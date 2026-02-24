@@ -1,0 +1,301 @@
+/* Main floating replay window */
+.twitch-replay-window {
+  --treplay-scale: 1;
+  --purple: #A970FF;
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  width: 440px;
+  height: 320px;
+  min-width: 280px;
+  min-height: 200px;
+  background: #0e0e10;
+  border-radius: 10px;
+  z-index: 999999;
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.8),
+    0 0 0 1px rgba(255,255,255,0.08);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Content container */
+.twitch-replay-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Inner video area */
+.twitch-replay-inner {
+  background: #000;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 10px 10px 0 0;
+}
+
+/* Video wrapper */
+.twitch-replay-video-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Video element */
+.twitch-replay-video {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  background: #000;
+  object-fit: contain;
+}
+
+/* Floating header overlay */
+.twitch-replay-header {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.twitch-replay-header > * {
+  pointer-events: auto; /* Allow interaction */
+}
+
+/* Status pill */
+.twitch-replay-chip {
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.1);
+  padding: 3px 9px;
+  border-radius: 100px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  color: rgba(255,255,255,0.85);
+  letter-spacing: 0.3px;
+}
+
+/* Animated live dot */
+.twitch-replay-live-dot {
+  width: 5px;
+  height: 5px;
+  background: var(--purple);
+  border-radius: 50%;
+  animation: treplay-pulse 2s infinite;
+}
+
+@keyframes treplay-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* Close button */
+.twitch-replay-close {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.65);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+}
+
+.twitch-replay-close:hover {
+  background: rgba(220, 50, 50, 0.85);
+  border-color: transparent;
+  color: white;
+}
+
+/* Controls panel */
+.twitch-replay-controls-panel {
+  padding: 8px 12px 10px;
+  background: #0e0e10;
+  border-top: 1px solid rgba(255,255,255,0.07);
+  flex-shrink: 0;
+}
+
+/* Seek bar container */
+.twitch-replay-seek-wrapper {
+  margin-bottom: 8px;
+  position: relative;
+  height: 4px;
+  width: 100%;
+}
+
+/* Buffered portion */
+.twitch-replay-seek-buffer {
+  position: absolute;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  pointer-events: none;
+  left: 0;
+  top: 0;
+  width: 0%;
+}
+
+/* Playback progress */
+.twitch-replay-seek-progress {
+  position: absolute;
+  height: 100%;
+  background: var(--purple);
+  border-radius: 2px;
+  pointer-events: none;
+  left: 0;
+  top: 0;
+  z-index: 1;
+  width: 0%;
+}
+
+/* Invisible input slider */
+.twitch-replay-seek {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 2px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  outline: none;
+  z-index: 2;
+}
+
+/* Slider thumb (WebKit) */
+.twitch-replay-seek::-webkit-slider-runnable-track {
+  width: 100%;
+  height: 4px;
+  background: transparent;
+  border-radius: 2px;
+}
+
+/* Slider track (Firefox) */
+.twitch-replay-seek::-moz-range-track {
+  width: 100%;
+  height: 4px;
+  background: transparent;
+  border-radius: 2px;
+  border: none;
+}
+
+/* Slider thumb (Chrome / Safari / Edge) */
+.twitch-replay-seek::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  background: white;
+  border-radius: 50%;
+  cursor: pointer;
+  margin-top: -4px;
+  box-shadow: 0 0 0 2px rgba(169,112,255,0.5);
+  transition: transform 0.1s;
+}
+
+.twitch-replay-seek::-webkit-slider-thumb:hover { transform: scale(1.2); }
+
+.twitch-replay-seek::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  background: white;
+  border-radius: 50%;
+  cursor: pointer;
+  border: none;
+  box-shadow: 0 0 0 2px rgba(169,112,255,0.5);
+}
+
+/* Controls row layout */
+.twitch-replay-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Play button */
+.twitch-replay-play {
+  width: calc(28px * var(--treplay-scale));
+  height: calc(28px * var(--treplay-scale));
+  border-radius: 50%;
+  background: var(--purple);
+  border: none;
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: calc(11px * var(--treplay-scale));
+  transition: background 0.15s, transform 0.1s;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.twitch-replay-play:hover {
+  background: #b880ff;
+  transform: scale(1.08);
+}
+
+/* Time display */
+.twitch-replay-time-display {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.twitch-replay-current {
+  color: rgba(255,255,255,0.9);
+  font-weight: 500;
+}
+
+.twitch-replay-separator { color: rgba(255,255,255,0.2); }
+.twitch-replay-duration { color: rgba(255,255,255,0.3); }
+
+/* Drag resize handle */
+.twitch-replay-resize {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 50%, rgba(169,112,255,0.4) 50%);
+  z-index: 10;
+  border-bottom-right-radius: 10px;
+}
+
+/* Ensure proper positioning in fullscreen */
+[fullscreen] .twitch-replay-window,
+:-webkit-full-screen .twitch-replay-window,
+:-moz-full-screen .twitch-replay-window {
+  --treplay-scale: 1;
+  position: fixed !important;
+}

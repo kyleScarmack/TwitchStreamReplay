@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "Twitch Stream Replay",
+  "version": "1.0.0",
+  "description": "Stream replay for Twitch with theatre/fullscreen support and modern UI",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://www.twitch.tv/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.twitch.tv/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png",
+    "32": "icons/icon32.png"
+  },
+  "commands": {
+    "stream-replay": {
+      "suggested_key": {
+        "default": "Alt+Left"
+      },
+      "description": "Stream Replay"
+    }
+  }
+}
