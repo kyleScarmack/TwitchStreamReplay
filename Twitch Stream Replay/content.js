@@ -1,28 +1,29 @@
+// content.js
+
 class TwitchReplayRecorder {
   constructor() {
-    // MediaRecorder state
-    this.recorders = [];
-    this.dataChunks = [];
-    this.recordingStartTimes = [];
+    // Ring buffer (dynamic import)
+    this.ringBuffer = null;
+    this._RingBufferCtor = null;
 
-    // Control flags / timers
+    // State / timers
     this.listenerAdded = false;
     this.isReplaying = false;
     this.initializationInProgress = false;
     this.timeouts = [];
     this.adCheckInterval = null;
 
-    // DOM + replay UI
+    // DOM + overlay
     this.videoElement = null;
-    this.captureStream = null;
+    this.captureStream = null; // legacy (unused)
     this.replayWindow = null;
     this.lastUrl = window.location.href;
     this._replayRaf = null;
 
-    // User settings (overridden from storage)
+    // Settings (overridden by storage)
     this.settings = {
       replayDuration: 30,
-      numberOfRecorders: 2,
+      numberOfRecorders: 2, // legacy (unused)
       keyBinding: 'ArrowLeft',
       volumeReduction: 0.3,
       autoCloseReplay: true,
@@ -32,7 +33,7 @@ class TwitchReplayRecorder {
     this.init();
   }
 
-  // Bootstraps once settings + DOM are ready
+  // Bootstrap after settings + DOM ready
   async init() {
     await this.loadSettings();
     if (document.readyState === 'loading') {
@@ -52,7 +53,7 @@ class TwitchReplayRecorder {
     }
   }
 
-  // Main startup for listeners + video detection
+  // Start listeners + find video
   start() {
     this.setupKeyListener();
     this.setupSettingsListener();
@@ -61,16 +62,46 @@ class TwitchReplayRecorder {
     setInterval(() => this.checkNavigation(), 500);
   }
 
-  // Hot-reload settings from popup
+  // Listen for popup/storage changes
   setupSettingsListener() {
     chrome.runtime.onMessage.addListener((message) => {
       if (message && message.type === 'SETTINGS_UPDATED') {
+        const prevDuration = this.settings.replayDuration;
         this.settings = { ...this.settings, ...(message.settings || {}) };
+
+        if (
+          typeof this.settings.replayDuration !== 'undefined' &&
+          this.settings.replayDuration !== prevDuration
+        ) {
+          console.log(
+            `[TSR] replayDuration changed ${prevDuration} -> ${this.settings.replayDuration}, restarting buffer`
+          );
+          this.restartBufferSoon();
+        }
+      }
+    });
+
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'sync') return;
+      if (changes.replayDuration) {
+        const prev = this.settings.replayDuration;
+        this.settings.replayDuration = changes.replayDuration.newValue;
+        console.log(
+          `[TSR] replayDuration storage changed ${prev} -> ${this.settings.replayDuration}, restarting buffer`
+        );
+        this.restartBufferSoon();
       }
     });
   }
 
-  // Detect SPA navigation changes on Twitch
+  // Restart buffer after a duration change
+  restartBufferSoon() {
+    try { this.ringBuffer?.stop?.(); } catch (_) {}
+    this.ringBuffer = null;
+    setTimeout(() => this.initialize(), 250);
+  }
+
+  // Detect Twitch SPA navigation
   checkNavigation() {
     const currentUrl = window.location.href;
     if (currentUrl !== this.lastUrl) {
@@ -80,7 +111,7 @@ class TwitchReplayRecorder {
     }
   }
 
-  // Find the active Twitch <video> and initialize recording
+  // Find the active <video> and init buffer
   findVideo() {
     const video = document.querySelector('video');
     if (!video) {
@@ -92,141 +123,169 @@ class TwitchReplayRecorder {
     }
     this.videoElement = video;
 
-    if (video.readyState >= 2) {
-      this.initialize();
-    } else {
-      video.addEventListener('loadeddata', () => this.initialize(), { once: true });
-    }
+    this.initialize();
 
-    // Catch video element swaps
-    video.addEventListener('loadedmetadata', () => {
-      const current = document.querySelector('video');
-      if (current && current !== this.videoElement) {
-        this.destroy();
-        this.findVideo();
-      }
-    }, { once: true });
+    // Handle video element swaps
+    video.addEventListener(
+      'loadedmetadata',
+      () => {
+        const current = document.querySelector('video');
+        if (current && current !== this.videoElement) {
+          this.destroy();
+          this.findVideo();
+        }
+      },
+      { once: true }
+    );
   }
 
-  // Listen for the replay hotkey
+  // Hotkey to trigger replay
   setupKeyListener() {
-    window.addEventListener('keydown', (e) => {
-      if (e.key !== this.settings.keyBinding) return;
+    window.addEventListener(
+      'keydown',
+      (e) => {
+        if (e.key !== this.settings.keyBinding) return;
 
-      // Ignore keybind while typing
-      const el = document.activeElement;
-      const isTyping = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
-      if (isTyping) return;
+        const el = document.activeElement;
+        const isTyping =
+          el &&
+          (el.tagName === 'INPUT' ||
+            el.tagName === 'TEXTAREA' ||
+            el.isContentEditable);
+        if (isTyping) return;
 
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-      this.playReplay();
-    }, true);
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        this.playReplay();
+      },
+      true
+    );
   }
 
-  // Initializes capture + recorders (guarded from double-runs)
-  async initialize() {
-    if (this.initializationInProgress) {
-      console.log("[ITR] Initialization already in progress");
-      return false;
+  // Dynamic import for rolling buffer
+  async getRingBufferCtor() {
+    if (this._RingBufferCtor) return this._RingBufferCtor;
+
+    const url = chrome.runtime.getURL('rollingReplay.js');
+    console.log('[TSR] Importing ring buffer from:', url);
+
+    let mod;
+    try {
+      mod = await import(url);
+    } catch (e) {
+      console.error(
+        '[TSR] Dynamic import FAILED. Likely web_accessible_resources.',
+        e
+      );
+      throw e;
     }
+
+    const ctor = mod.default || mod.RollingReplayBuffer || mod.WebCodecsRingBuffer;
+    if (!ctor) throw new Error('[TSR] No export found. Expected default export.');
+
+    this._RingBufferCtor = ctor;
+    return ctor;
+  }
+
+  // Initialize the ring buffer (guarded)
+  async initialize() {
+    if (this.initializationInProgress) return false;
 
     this.initializationInProgress = true;
-    console.log("[ITR] Starting initialization with delay...");
+    console.log('[TSR] Starting initialization with delay...');
 
     try {
-      // Allow Twitch player to settle
       await new Promise((resolve) => setTimeout(resolve, 2000));
 
-      // Avoid recording ads
-      console.log("[ITR] Checking for ads before initialization...");
+      console.log('[TSR] Checking for ads before initialization...');
       await this.waitForAdToFinish();
-      console.log("[ITR] No ads playing, proceeding with initialization");
+      console.log('[TSR] No ads playing, proceeding with initialization');
 
-      const videoElement = document.querySelector("video");
+      const videoElement = document.querySelector('video');
       if (!videoElement) {
-        console.warn("[ITR] No video element found.");
+        console.warn('[TSR] No video element found.');
         return false;
       }
 
-      // Wait until media is playable
+      this.videoElement = videoElement;
+
+      // Wait until enough data is buffered
       if (videoElement.readyState < 3) {
-        console.log("[ITR] Video not ready yet, waiting for metadata...");
+        console.log('[TSR] Video not ready yet, waiting for data...');
         await new Promise((resolve) => {
-          videoElement.addEventListener("loadeddata", resolve, { once: true });
+          const check = () => {
+            if (!this.videoElement || videoElement !== this.videoElement) return resolve();
+            if (videoElement.readyState >= 3) resolve();
+            else setTimeout(check, 200);
+          };
+          check();
         });
       }
 
-      const mediaStream = await this.captureVideoStream(videoElement);
-      if (!mediaStream) {
-        console.warn("[ITR] Failed to capture media stream");
+      // Reset any existing buffer
+      if (this.ringBuffer) {
+        try { this.ringBuffer.stop?.(); } catch (_) {}
+        this.ringBuffer = null;
+      }
+
+      const RingBuffer = await this.getRingBufferCtor();
+      const durationSec = Number(this.settings.replayDuration || 30);
+      const bitrate = 2_500_000;
+
+      console.log(`[TSR] Starting ring buffer: duration=${durationSec}s bitrate=${bitrate}`);
+      this.ringBuffer = new RingBuffer(durationSec, bitrate);
+
+      const ok = await this.ringBuffer.start(videoElement);
+      console.log('[TSR] ringBuffer.start() returned:', ok);
+
+      if (!ok) {
+        console.warn('[TSR] Failed to start ring buffer');
+        this.ringBuffer = null;
         return false;
       }
 
-      if (!mediaStream.getTracks().length) {
-        console.warn("[ITR] Media stream has no tracks");
-        return false;
-      }
-
-      const options = await this.getBestRecordingOptions();
-      if (!options) return false;
-
-      await this.initializeRecorders(mediaStream, options);
+      this.setupAdCheckInterval();
       return true;
+    } catch (e) {
+      console.error('[TSR] initialize() failed:', e);
+      return false;
     } finally {
       this.initializationInProgress = false;
     }
   }
 
-  // Periodically pauses recording during ads
+  // Pause/resume during ads
   setupAdCheckInterval() {
-    if (this.adCheckInterval) {
-      clearInterval(this.adCheckInterval);
-    }
+    if (this.adCheckInterval) clearInterval(this.adCheckInterval);
+
     this.adCheckInterval = setInterval(async () => {
       if (this.isAdPlaying()) {
-        console.log("[ITR] Ad detected, pausing recorders");
+        console.log('[TSR] Ad detected, pausing buffer');
         this.pauseAllRecorders();
         await this.waitForAdToFinish();
-        console.log("[ITR] Ad finished, resuming recorders");
+        console.log('[TSR] Ad finished, resuming buffer');
         this.resumeAllRecorders();
       }
     }, 1000);
   }
 
-  // Pause all active recorders
   pauseAllRecorders() {
-    for (let i = 0; i < this.recorders.length; i++) {
-      const recorder = this.recorders[i];
-      if (recorder.state === "recording") {
-        recorder.pause();
-      }
-    }
+    try { this.ringBuffer?.pause?.(); } catch (_) {}
   }
 
-  // Resume paused recorders
   resumeAllRecorders() {
-    for (let i = 0; i < this.recorders.length; i++) {
-      const recorder = this.recorders[i];
-      if (recorder.state === "paused") {
-        recorder.resume();
-      }
-    }
+    try { this.ringBuffer?.resume?.(); } catch (_) {}
   }
 
-  // Twitch ad label detection
   isAdPlaying() {
     return !!document.querySelector('span[data-a-target="video-ad-label"]');
   }
 
-  // Wait until ad label disappears
   async waitForAdToFinish() {
     return new Promise((resolve) => {
-      if (!this.isAdPlaying()) {
-        resolve();
-        return;
-      }
+      if (!this.isAdPlaying()) return resolve();
+
       const observer = new MutationObserver(() => {
         if (!this.isAdPlaying()) {
           observer.disconnect();
@@ -241,228 +300,66 @@ class TwitchReplayRecorder {
     });
   }
 
-  // Capture stream from the video element (Chrome/Firefox)
-  async captureVideoStream(videoElement) {
-    try {
-      let stream = null;
-      if (videoElement.captureStream) {
-        stream = videoElement.captureStream();
-      } else if (videoElement.mozCaptureStream) {
-        stream = videoElement.mozCaptureStream();
-      }
-      if (!stream) {
-        console.error("[ITR] Video captureStream() not supported");
-        return null;
-      }
-      if (stream.getTracks().length === 0) {
-        console.error("[ITR] Captured stream has no tracks");
-        return null;
-      }
-      console.log(
-        "[ITR] Successfully captured video stream with tracks:",
-        stream.getTracks().map((t) => t.kind).join(", ")
-      );
-      return stream;
-    } catch (error) {
-      console.error("[ITR] Error capturing stream:", error);
-      return null;
-    }
-  }
-
-  // Pick best available codec for MediaRecorder
-  async getBestRecordingOptions() {
-    const codecPreferences = [
-      "video/webm; codecs=vp9",
-      "video/webm; codecs=vp8",
-      "video/webm",
-    ];
-    for (const mimeType of codecPreferences) {
-      if (MediaRecorder.isTypeSupported(mimeType)) {
-        console.log("[ITR] Using codec:", mimeType);
-        return {
-          mimeType,
-          videoBitsPerSecond: 2500000,
-        };
-      }
-    }
-    console.error("[ITR] No supported mime types found");
-    return null;
-  }
-
-  // Create recorder ring (staggered) to cover last N seconds
-  async initializeRecorders(mediaStream, options) {
-    this.recorders = [];
-    this.dataChunks = [];
-    this.recordingStartTimes = [];
-
-    const numberOfRecorders = this.settings.numberOfRecorders || 2;
-
-    for (let i = 0; i < numberOfRecorders; i++) {
-      try {
-        const recorder = new MediaRecorder(mediaStream, options);
-        this.dataChunks[i] = [];
-
-        recorder.ondataavailable = (event) => {
-          if (event.data && event.data.size > 0) {
-            this.dataChunks[i]?.push(event.data);
-            console.log(
-              `[ITR] Data chunk received for recorder ${i}, total chunks: ${this.dataChunks[i].length}, size: ${event.data.size} bytes`
-            );
-          }
-        };
-
-        recorder.onerror = (error) => {
-          console.error(`[ITR] MediaRecorder ${i} error:`, error);
-        };
-
-        recorder.onstart = () => {
-          this.recordingStartTimes[i] = Date.now();
-          console.log(
-            `[ITR] Recorder ${i} started at ${new Date(this.recordingStartTimes[i]).toISOString()}`
-          );
-        };
-
-        recorder.onstop = () => {
-          console.log(`[ITR] Recorder ${i} stopped successfully`);
-        };
-
-        this.recorders.push(recorder);
-      } catch (error) {
-        console.error(`[ITR] Error creating MediaRecorder ${i}:`, error);
-        return false;
-      }
-    }
-
-    await this.startStaggeredRecording();
-    return true;
-  }
-
-  // Start recorder 0 immediately, others offset to fill gaps
-  async startStaggeredRecording() {
-    this.startRecorder(0);
-
-    const numberOfRecorders = this.settings.numberOfRecorders || 2;
-    for (let i = 1; i < numberOfRecorders; i++) {
-      this.timeouts.push(
-        setTimeout(() => {
-          this.startRecorder(i);
-        }, (this.settings.replayDuration / numberOfRecorders) * 1000 * i)
-      );
-    }
-  }
-
-  // Start one recorder with a 1s timeslice and scheduled restart
-  startRecorder(index) {
-    const recorder = this.recorders[index];
-
-    try {
-      if (recorder.state === "inactive") {
-        this.dataChunks[index] = [];
-        recorder.start(1000);
-        console.log(`[ITR] Recorder ${index} started with timeslice of 1 second`);
-
-        this.timeouts.push(
-          setTimeout(() => {
-            this.restartRecorder(index);
-          }, this.settings.replayDuration * 1000)
-        );
-      }
-    } catch (error) {
-      console.error(`[ITR] Error starting recorder ${index}:`, error);
-    }
-  }
-
-  // Cycle recorder to maintain rolling buffer
-  restartRecorder(index) {
-    const recorder = this.recorders[index];
-
-    try {
-      if (recorder.state !== "inactive") {
-        recorder.stop();
-        setTimeout(() => {
-          this.startRecorder(index);
-        }, 100);
-      }
-    } catch (error) {
-      console.error(`[ITR] Error restarting recorder ${index}:`, error);
-    }
-  }
-
-  // Choose recorder with most data available
-  getBestRecorder() {
-    let bestIndex = 0;
-    let maxChunks = 0;
-
-    for (let i = 0; i < this.recorders.length; i++) {
-      if (this.dataChunks[i] && this.dataChunks[i].length > maxChunks) {
-        maxChunks = this.dataChunks[i].length;
-        bestIndex = i;
-      }
-    }
-
-    return {
-      index: bestIndex,
-      recordedTime: maxChunks,
-    };
-  }
-
-  // Build a Blob from the best recorder and open replay UI
+  // Build + show replay from buffer
   async playReplay() {
     if (this.isReplaying) {
-      console.log("[ITR] Replay already in progress");
+      console.log('[TSR] Replay already in progress');
       return;
     }
 
-    const bestRecorder = this.getBestRecorder();
-    const chunks = this.dataChunks[bestRecorder.index];
-
-    if (!chunks || chunks.length === 0) {
-      console.warn("[ITR] No replay data available yet");
+    if (!this.ringBuffer) {
+      console.warn('[TSR] Ring buffer not initialized yet');
       return;
     }
 
-    console.log(
-      `[ITR] Playing replay from recorder ${bestRecorder.index} with ${bestRecorder.recordedTime}s recorded`
-    );
+    if (!this.ringBuffer?.hasData?.()) {
+      console.warn('[TSR] Buffer still filling — wait for a full clip.');
+      return;
+    }
 
     this.isReplaying = true;
 
-    const mime = chunks[0].type || 'video/webm';
-    const blob = new Blob(chunks, { type: mime });
-    const url = URL.createObjectURL(blob);
-
-    // Reduce underlying stream volume during replay
+    // Reduce stream volume while replay plays
     const originalVolume = this.videoElement ? this.videoElement.volume : 1.0;
     if (this.videoElement) {
       this.videoElement.volume = Math.max(0, originalVolume * this.settings.volumeReduction);
     }
 
+    let blob = null;
+    try {
+      blob = await this.ringBuffer.getReplayBlob();
+    } catch (e) {
+      console.error('[TSR] Failed to create replay blob:', e);
+    }
+
+    if (!blob) {
+      console.warn('[TSR] Replay blob was null');
+      this.isReplaying = false;
+      if (this.videoElement) this.videoElement.volume = originalVolume;
+      return;
+    }
+
+    const url = URL.createObjectURL(blob);
     this.showReplay(url, originalVolume);
   }
 
-  // Stop recorders, clear timers, and remove UI
+  // Tear down everything on nav/video swap
   destroy() {
-    console.log("[ITR] Destroying replay system");
+    console.log('[TSR] Destroying replay system');
 
     if (this.adCheckInterval) {
       clearInterval(this.adCheckInterval);
       this.adCheckInterval = null;
     }
 
-    for (const recorder of this.recorders) {
-      if (recorder.state !== "inactive") {
-        recorder.stop();
-      }
+    if (this.ringBuffer) {
+      try { this.ringBuffer.stop?.(); } catch (_) {}
+      this.ringBuffer = null;
     }
 
-    for (const timeout of this.timeouts) {
-      clearTimeout(timeout);
-    }
-
-    this.recorders = [];
-    this.dataChunks = [];
-    this.recordingStartTimes = [];
+    for (const timeout of this.timeouts) clearTimeout(timeout);
     this.timeouts = [];
+
     this.listenerAdded = false;
     this.isReplaying = false;
     this.initializationInProgress = false;
@@ -472,12 +369,12 @@ class TwitchReplayRecorder {
     if (this.replayWindow) this.closeReplay();
   }
 
-  // Use fullscreen element when present so overlay stays visible
+  // Overlay parent (handles fullscreen)
   getOverlayParent() {
     return document.fullscreenElement || document.body;
   }
 
-  // Keep the window in bounds and attached to the right parent
+  // Keep overlay clamped on resize/fullscreen changes
   setupWindowListeners() {
     if (this._windowListenersReady) return;
     this._windowListenersReady = true;
@@ -492,15 +389,34 @@ class TwitchReplayRecorder {
     document.addEventListener('fullscreenchange', () => {
       if (!this.replayWindow) return;
       const parent = this.getOverlayParent();
-      if (this.replayWindow.parentElement !== parent) {
-        parent.appendChild(this.replayWindow);
-      }
+      if (this.replayWindow.parentElement !== parent) parent.appendChild(this.replayWindow);
       this.clampToViewport(this.replayWindow);
     });
   }
 
-  // Build replay window DOM + wire controls
+  // Build replay UI and wire controls
   showReplay(url, originalVolume) {
+    let cleanupReplay = () => {
+      this.isReplaying = false;
+      this.closeReplay();
+      try { URL.revokeObjectURL(url); } catch (_) {}
+      if (this.videoElement) this.videoElement.volume = originalVolume;
+    };
+
+    // ESC to close
+    const onEsc = (e) => {
+      if (e.key === 'Escape') cleanupReplay();
+    };
+    document.addEventListener('keydown', onEsc, true);
+
+    // Wrap cleanup so ESC listener is removed
+    const _origCleanup = cleanupReplay;
+    cleanupReplay = () => {
+      document.removeEventListener('keydown', onEsc, true);
+      _origCleanup();
+    };
+
+    // Replace any existing window
     if (this.replayWindow) {
       const oldVideo = this.replayWindow.querySelector('video');
       if (oldVideo && oldVideo.src) {
@@ -509,6 +425,26 @@ class TwitchReplayRecorder {
       this.closeReplay();
     }
 
+    // SVG speaker icon (muted/unmuted)
+    const speakerIcon = (muted) => {
+      if (muted) {
+        return `
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="currentColor" d="M3 9v6h4l5 4V5L7 9H3z"></path>
+            <path fill="currentColor" d="M16.5 8.5l4.5 4.5-1.4 1.4-4.5-4.5 1.4-1.4z"></path>
+            <path fill="currentColor" d="M21 8.5l-4.5 4.5-1.4-1.4 4.5-4.5 1.4 1.4z"></path>
+          </svg>
+        `;
+      }
+      return `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="currentColor" d="M3 9v6h4l5 4V5L7 9H3z"></path>
+          <path fill="currentColor" d="M16.5 12c0-1.8-1-3.3-2.5-4v8c1.5-.7 2.5-2.2 2.5-4z"></path>
+          <path fill="currentColor" d="M14 3.2v2.2c2.9 1 5 3.8 5 6.6s-2.1 5.6-5 6.6v2.2c4.1-1.1 7-4.8 7-8.8s-2.9-7.7-7-8.8z"></path>
+        </svg>
+      `;
+    };
+
     const container = document.createElement('div');
     container.className = 'twitch-replay-window';
     container.innerHTML = `
@@ -516,6 +452,7 @@ class TwitchReplayRecorder {
         <div class="twitch-replay-inner">
           <div class="twitch-replay-video-wrap">
             <video class="twitch-replay-video" autoplay playsinline></video>
+
             <div class="twitch-replay-header">
               <div class="twitch-replay-chip">
                 <div class="twitch-replay-live-dot"></div>
@@ -524,23 +461,34 @@ class TwitchReplayRecorder {
               <button class="twitch-replay-close">×</button>
             </div>
           </div>
+
           <div class="twitch-replay-controls-panel">
             <div class="twitch-replay-seek-wrapper">
               <div class="twitch-replay-seek-buffer" style="width: 0%"></div>
               <div class="twitch-replay-seek-progress" style="width: 0%"></div>
               <input class="twitch-replay-seek" type="range" min="0" max="1000" value="0" step="1">
             </div>
+
             <div class="twitch-replay-controls-row">
-              <button class="twitch-replay-play" title="Play/Pause">▶</button>
+              <div class="twitch-replay-controls-left">
+                <button class="twitch-replay-play" title="Play/Pause">▶</button>
+              </div>
+
               <div class="twitch-replay-time-display">
                 <span class="twitch-replay-current">0:00</span>
                 <span class="twitch-replay-separator">/</span>
                 <span class="twitch-replay-duration">0:00</span>
               </div>
+
+              <div class="twitch-replay-controls-right">
+                <button class="twitch-replay-speed" title="Playback speed">1×</button>
+                <button class="twitch-replay-mute" title="Mute/Unmute">${speakerIcon(false)}</button>
+              </div>
             </div>
           </div>
         </div>
       </div>
+
       <div class="twitch-replay-resize"></div>
     `;
 
@@ -548,27 +496,92 @@ class TwitchReplayRecorder {
     parent.appendChild(container);
     this.replayWindow = container;
 
-    // Restore saved window geometry if enabled
+    // Restore saved position/size (optional)
     this.applyWindowPosition(container).then(() => {
       this.clampToViewport(container);
       this.updateUiScale(container);
     });
+
+    const WANT = Number(this.settings.replayDuration || 5);
 
     const video = container.querySelector('video');
     video.src = url;
     video.volume = 1.0;
     video.controls = false;
 
+    // Always start at 0
+    video.addEventListener(
+      'loadedmetadata',
+      () => {
+        try { video.currentTime = 0; } catch (_) {}
+      },
+      { once: true }
+    );
+
+    // Close handlers
+    container.querySelector('.twitch-replay-close').addEventListener('click', cleanupReplay);
+    video.addEventListener('error', cleanupReplay);
+
+    // Auto-close after replay ends
+    video.addEventListener('ended', () => {
+      if (!this.settings.autoCloseReplay) return;
+      setTimeout(cleanupReplay, 350);
+    });
+
+    // Controls
     const playBtn = container.querySelector('.twitch-replay-play');
     const seek = container.querySelector('.twitch-replay-seek');
     const curEl = container.querySelector('.twitch-replay-current');
     const durEl = container.querySelector('.twitch-replay-duration');
     const progressBar = container.querySelector('.twitch-replay-seek-progress');
+    const muteBtn = container.querySelector('.twitch-replay-mute');
+    const speedBtn = container.querySelector('.twitch-replay-speed');
 
-    let knownDuration = 0;
+    // Mute for replay video only
+    let prevReplayVolume = 1.0;
+
+    const updateMuteIcon = () => {
+      const muted = video.muted || video.volume === 0;
+      if (muteBtn) muteBtn.innerHTML = speakerIcon(muted);
+    };
+
+    if (muteBtn) {
+      updateMuteIcon();
+      muteBtn.addEventListener('click', () => {
+        if (!video.muted && video.volume > 0) {
+          prevReplayVolume = video.volume;
+          video.muted = true;
+          video.volume = 0;
+        } else {
+          video.muted = false;
+          video.volume = prevReplayVolume > 0 ? prevReplayVolume : 1.0;
+        }
+        updateMuteIcon();
+      });
+    }
+
+    // Speed toggle
+    const SPEEDS = [1.0, 1.5, 2.0, 0.75];
+    let speedIdx = 0;
+
+    const applySpeed = () => {
+      const s = SPEEDS[speedIdx];
+      video.playbackRate = s;
+      if (speedBtn) speedBtn.textContent = `${s}×`;
+    };
+
+    if (speedBtn) {
+      applySpeed();
+      speedBtn.addEventListener('click', () => {
+        speedIdx = (speedIdx + 1) % SPEEDS.length;
+        applySpeed();
+      });
+    }
+
+    // Timeline UI uses the intended clip duration
+    const knownDuration = WANT;
     let isScrubbing = false;
 
-    // Format seconds as M:SS
     const fmt = (secs) => {
       if (!isFinite(secs) || secs < 0) return '0:00';
       const s = Math.floor(secs % 60);
@@ -576,62 +589,22 @@ class TwitchReplayRecorder {
       return `${m}:${s.toString().padStart(2, '0')}`;
     };
 
-    // Set duration UI and slider max (ms)
-    const setDurationUI = (d) => {
-      knownDuration = (isFinite(d) && d > 0) ? d : 0;
-      durEl.textContent = fmt(knownDuration);
-      seek.max = knownDuration > 0 ? Math.floor(knownDuration * 1000).toString() : '1000';
-    };
+    durEl.textContent = fmt(knownDuration);
+    seek.max = Math.floor(knownDuration * 1000).toString();
 
-    // Probe duration for blobs that report Infinity/0 initially
-    const probeDuration = () => new Promise((resolve) => {
-      const probe = document.createElement('video');
-      probe.muted = true;
-      probe.preload = 'metadata';
-      probe.src = url;
-      probe.addEventListener('loadedmetadata', () => {
-        if (!isFinite(probe.duration) || probe.duration === Infinity || probe.duration === 0) {
-          const onTU = () => {
-            probe.removeEventListener('timeupdate', onTU);
-            resolve(probe.duration);
-          };
-          probe.addEventListener('timeupdate', onTU, { once: true });
-          try { probe.currentTime = 1e101; } catch (_) { resolve(0); }
-        } else {
-          resolve(probe.duration);
-        }
-      }, { once: true });
-      probe.addEventListener('error', () => resolve(0), { once: true });
-    });
-
-    probeDuration().then(setDurationUI);
-
-    video.addEventListener('loadedmetadata', () => {
-      if (isFinite(video.duration) && video.duration > 0) setDurationUI(video.duration);
-    }, { once: true });
-
-    // UI update loop
     const updateLoop = () => {
       if (!this.replayWindow) return;
-
-      if (knownDuration <= 0 && isFinite(video.duration) && video.duration > 0) {
-        setDurationUI(video.duration);
-      }
 
       if (!isScrubbing) {
         const t = video.currentTime || 0;
         curEl.textContent = fmt(t);
 
-        if (knownDuration > 0) {
-          const ms = Math.floor(t * 1000);
-          const max = parseInt(seek.max || '1000', 10);
-          seek.value = Math.min(ms, max).toString();
-          const percent = (t / knownDuration) * 100;
-          progressBar.style.width = `${Math.min(percent, 100)}%`;
-        } else {
-          seek.value = '0';
-          progressBar.style.width = '0%';
-        }
+        const ms = Math.floor(t * 1000);
+        const max = parseInt(seek.max || '1000', 10);
+        seek.value = Math.min(ms, max).toString();
+
+        const percent = (t / knownDuration) * 100;
+        progressBar.style.width = `${Math.min(percent, 100)}%`;
       }
 
       playBtn.textContent = video.paused ? '▶' : '⏸';
@@ -644,26 +617,22 @@ class TwitchReplayRecorder {
     }
     this._replayRaf = requestAnimationFrame(updateLoop);
 
-    // Play/pause toggle
     playBtn.addEventListener('click', () => {
       if (video.paused) video.play().catch(() => {});
       else video.pause();
     });
 
-    // Live scrub preview
+    // Scrub preview
     seek.addEventListener('input', () => {
       isScrubbing = true;
       const ms = parseInt(seek.value || '0', 10);
       curEl.textContent = fmt(ms / 1000);
-      if (knownDuration > 0) {
-        const percent = (ms / 1000 / knownDuration) * 100;
-        progressBar.style.width = `${Math.min(percent, 100)}%`;
-      }
+      const percent = (ms / 1000 / knownDuration) * 100;
+      progressBar.style.width = `${Math.min(percent, 100)}%`;
     });
 
-    // Commit scrub to video
+    // Commit scrub
     const commitSeek = () => {
-      if (knownDuration <= 0) { isScrubbing = false; return; }
       const ms = parseInt(seek.value || '0', 10);
       const t = ms / 1000;
       try { video.currentTime = Math.min(Math.max(0, t), knownDuration); } catch (_) {}
@@ -674,30 +643,11 @@ class TwitchReplayRecorder {
     seek.addEventListener('mouseup', commitSeek);
     seek.addEventListener('touchend', commitSeek);
 
-    // Close button restores volume + cleans blob URL
-    container.querySelector('.twitch-replay-close').addEventListener('click', () => {
-      this.isReplaying = false;
-      this.closeReplay();
-      try { URL.revokeObjectURL(url); } catch (_) {}
-      if (this.videoElement) this.videoElement.volume = originalVolume;
-    });
-
-    // Auto-close at end (optional)
-    video.addEventListener('ended', () => {
-      if (!this.settings.autoCloseReplay) return;
-      setTimeout(() => {
-        this.isReplaying = false;
-        this.closeReplay();
-        try { URL.revokeObjectURL(url); } catch (_) {}
-        if (this.videoElement) this.videoElement.volume = originalVolume;
-      }, 350);
-    });
-
     this.makeDraggable(container);
     this.makeResizable(container);
   }
 
-  // Drag window by grabbing the chip/header area
+  // Drag window via header chip
   makeDraggable(container) {
     const header = container.querySelector('.twitch-replay-header');
     const chip = container.querySelector('.twitch-replay-chip');
@@ -741,7 +691,7 @@ class TwitchReplayRecorder {
     });
   }
 
-  // Resize using the bottom-right handle
+  // Resize window via bottom-right handle
   makeResizable(container) {
     const handle = container.querySelector('.twitch-replay-resize');
 
@@ -778,7 +728,7 @@ class TwitchReplayRecorder {
     });
   }
 
-  // Keep window inside viewport bounds
+  // Keep window fully on-screen
   clampToViewport(container) {
     if (!container) return;
     const parent = this.getOverlayParent();
@@ -796,7 +746,7 @@ class TwitchReplayRecorder {
     container.style.bottom = 'auto';
   }
 
-  // Adjust UI sizing for small window widths
+  // Scale UI at small widths
   updateUiScale(container) {
     if (!container) return;
     const w = container.getBoundingClientRect().width;
@@ -808,7 +758,7 @@ class TwitchReplayRecorder {
     container.style.setProperty('--treplay-scale', String(scale));
   }
 
-  // Persist window position (local storage)
+  // Persist window position/size
   async saveWindowPosition(container) {
     if (!container) return;
     const rect = container.getBoundingClientRect();
@@ -820,7 +770,6 @@ class TwitchReplayRecorder {
     }
   }
 
-  // Read saved window position
   async getWindowPosition() {
     if (!this.settings.rememberWindowPosition) return null;
     try {
@@ -831,7 +780,6 @@ class TwitchReplayRecorder {
     }
   }
 
-  // Apply saved window position if present
   async applyWindowPosition(container) {
     const saved = await this.getWindowPosition();
     if (!saved) return;
@@ -844,8 +792,10 @@ class TwitchReplayRecorder {
     this.clampToViewport(container);
   }
 
-  // Remove replay window and stop UI RAF loop
+  // Remove overlay
   closeReplay() {
+    this.isReplaying = false;
+
     if (this._replayRaf) {
       cancelAnimationFrame(this._replayRaf);
       this._replayRaf = null;
@@ -859,7 +809,7 @@ class TwitchReplayRecorder {
 
 let __twitchReplayRecorder = null;
 
-// Create recorder instance once the DOM is ready
+// Init once DOM is ready
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
     __twitchReplayRecorder = new TwitchReplayRecorder();
@@ -868,7 +818,7 @@ if (document.readyState === 'loading') {
   __twitchReplayRecorder = new TwitchReplayRecorder();
 }
 
-// Allow background command to trigger replay
+// External trigger from background/popup
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'CREATE_REPLAY' && __twitchReplayRecorder) {
     __twitchReplayRecorder.playReplay();
