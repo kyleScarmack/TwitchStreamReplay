@@ -89,10 +89,10 @@ export default class SegmentRotatingReplayBuffer {
     try {
       if (videoElement.captureStream) return videoElement.captureStream();
       if (videoElement.mozCaptureStream) return videoElement.mozCaptureStream();
-      console.error("[TSR] captureStream() not supported");
+      console.warn("[TSR] captureStream() not supported in this browser.");
       return null;
     } catch (e) {
-      console.error("[TSR] captureStream() failed:", e);
+      console.warn("[TSR] captureStream() failed — video may not be ready yet.", e);
       return null;
     }
   }
@@ -144,7 +144,7 @@ export default class SegmentRotatingReplayBuffer {
 
       this._startRecorder();
     } catch (e) {
-      console.error("[TSR] rotateSegment failed:", e);
+      console.warn("[TSR] Segment rotation failed — will retry on next interval.", e);
     } finally {
       this._rotating = false;
     }
@@ -165,7 +165,7 @@ export default class SegmentRotatingReplayBuffer {
     try {
       rec = new MediaRecorder(this._stream, options);
     } catch (e) {
-      console.error("[TSR] MediaRecorder init failed:", e);
+      console.warn("[TSR] MediaRecorder could not be created.", e);
       return false;
     }
 
@@ -177,7 +177,7 @@ export default class SegmentRotatingReplayBuffer {
     };
 
     rec.onerror = (evt) => {
-      console.error("[TSR] MediaRecorder error:", evt?.error || evt);
+      console.warn("[TSR] MediaRecorder encountered an error.", evt?.error || evt);
     };
 
     rec.onstop = () => {
@@ -186,7 +186,7 @@ export default class SegmentRotatingReplayBuffer {
         const blob = new Blob(this._chunks, { type: this._mimeType || "video/webm" });
         if (blob.size > 0) this._lastBlob = blob;
       } catch (e) {
-        console.error("[TSR] failed to finalize segment:", e);
+        console.warn("[TSR] Could not finalize segment blob.", e);
       }
     };
 
@@ -196,7 +196,7 @@ export default class SegmentRotatingReplayBuffer {
       rec.start(); // no timeslice -> one clean file per segment
       return true;
     } catch (e) {
-      console.error("[TSR] MediaRecorder.start() failed:", e);
+      console.warn("[TSR] MediaRecorder.start() failed — stream may not be ready.", e);
       this._recorder = null;
       return false;
     }

@@ -1,7 +1,7 @@
 /* Floating replay window */
 .twitch-replay-window {
   --treplay-scale: 1;
-  --purple: #A970FF;
+  --purple: #9147ff;
   position: fixed;
   bottom: 20px;
   right: 20px;
@@ -168,14 +168,14 @@
   background: white;
   border-radius: 50%;
   margin-top: -4px;
-  box-shadow: 0 0 0 2px rgba(169,112,255,0.5);
+  box-shadow: 0 0 0 2px rgba(145, 71, 255, 0.5);
 }
 
 .twitch-replay-seek::-webkit-slider-thumb:hover { transform: scale(1.2); }
 
 /* Controls row */
 .twitch-replay-controls-row {
-  position: relative;            /* Needed for centered time */
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -206,13 +206,15 @@
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  overflow: hidden;
+  line-height: 1;
 }
 
 /* Shared hover + active */
 .twitch-replay-play:hover,
 .twitch-replay-mute:hover,
 .twitch-replay-speed:hover {
-  background: #b880ff;
+  background: #772ce8;
   transform: scale(1.08);
 }
 
@@ -222,16 +224,22 @@
   transform: scale(0.95);
 }
 
+/* Play/pause nudge handled in JS per-state */
+
 /* Icon sizing */
 .twitch-replay-mute svg {
   width: calc(16px * var(--treplay-scale));
   height: calc(16px * var(--treplay-scale));
 }
 
-/* Speed text tweak */
-.twitch-replay-speed {
-  font-weight: 650;
-  letter-spacing: 0.2px;
+/* Speed button — monospace to match time display, !important to beat Twitch page styles */
+.twitch-replay-window .twitch-replay-speed,
+.twitch-replay-window .twitch-replay-speed:not(:hover) {
+  font-family: 'SF Mono', 'Consolas', monospace !important;
+  font-size: calc(11px * var(--treplay-scale)) !important;
+  font-weight: 500 !important;
+  letter-spacing: -0.5px !important;
+  line-height: 1 !important;
 }
 
 /* Centered time display */
@@ -258,7 +266,7 @@
   width: 14px;
   height: 14px;
   cursor: nwse-resize;
-  background: linear-gradient(135deg, transparent 50%, rgba(169,112,255,0.4) 50%);
+  background: linear-gradient(135deg, transparent 50%, rgba(145, 71, 255, 0.4) 50%);
   border-bottom-right-radius: 10px;
 }
 

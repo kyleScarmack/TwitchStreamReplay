@@ -1,8 +1,10 @@
 // Default popup settings (used as storage fallback + reset)
+// volumeReduction stored as 0–100 integer in the popup layer;
+// converted to 0.0–1.0 float only when writing to storage for content.js
 const defaultSettings = {
   replayDuration: 30,
   keyBinding: 'ArrowLeft',
-  volumeReduction: 0.3,
+  volumeReduction: 30,   // stored as 0–100 here; converted on save
   autoCloseReplay: true,
   rememberWindowPosition: false
 };
@@ -43,10 +45,22 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 // Load settings from storage into UI
+// volumeReduction comes back as a 0.0–1.0 float from content.js storage,
+// so we multiply by 100 before handing it to the slider.
 async function loadSettings() {
-  const s = await chrome.storage.sync.get(defaultSettings);
+  const storageDefaults = {
+    replayDuration: defaultSettings.replayDuration,
+    keyBinding: defaultSettings.keyBinding,
+    volumeReduction: defaultSettings.volumeReduction / 100, // expect float in storage
+    autoCloseReplay: defaultSettings.autoCloseReplay,
+    rememberWindowPosition: defaultSettings.rememberWindowPosition,
+  };
+
+  const s = await chrome.storage.sync.get(storageDefaults);
 
   syncSlider('replayDuration', 'durationInput', s.replayDuration, 5, 60);
+
+  // Convert float 0.0–1.0 → integer 0–100 for the slider
   const volPct = Math.round(s.volumeReduction * 100);
   syncSlider('volumeReduction', 'volumeInput', volPct, 0, 100);
 
@@ -137,6 +151,7 @@ function setupKeyCapture() {
 }
 
 // Save settings and notify active Twitch tab
+// volumeReduction is stored as 0.0–1.0 float so content.js can use it directly
 async function saveSettings() {
   const settings = {
     replayDuration: parseInt(document.getElementById('replayDuration').value),
@@ -158,9 +173,12 @@ async function saveSettings() {
   }
 }
 
-// Restore defaults
+// Restore defaults — write as floats to match what loadSettings expects back
 async function resetSettings() {
-  await chrome.storage.sync.set(defaultSettings);
+  await chrome.storage.sync.set({
+    ...defaultSettings,
+    volumeReduction: defaultSettings.volumeReduction / 100, // store as float
+  });
   await loadSettings();
   showToast('Reset to defaults', 'success');
 }

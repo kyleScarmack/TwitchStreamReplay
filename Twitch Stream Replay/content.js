@@ -49,7 +49,7 @@ class TwitchReplayRecorder {
       const stored = await chrome.storage.sync.get(this.settings);
       this.settings = { ...this.settings, ...stored };
     } catch (e) {
-      console.error('[Twitch Replay] Error loading settings:', e);
+      console.warn('[Twitch Replay] Could not load settings, using defaults.', e);
     }
   }
 
@@ -73,9 +73,6 @@ class TwitchReplayRecorder {
           typeof this.settings.replayDuration !== 'undefined' &&
           this.settings.replayDuration !== prevDuration
         ) {
-          console.log(
-            `[TSR] replayDuration changed ${prevDuration} -> ${this.settings.replayDuration}, restarting buffer`
-          );
           this.restartBufferSoon();
         }
       }
@@ -84,11 +81,7 @@ class TwitchReplayRecorder {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'sync') return;
       if (changes.replayDuration) {
-        const prev = this.settings.replayDuration;
         this.settings.replayDuration = changes.replayDuration.newValue;
-        console.log(
-          `[TSR] replayDuration storage changed ${prev} -> ${this.settings.replayDuration}, restarting buffer`
-        );
         this.restartBufferSoon();
       }
     });
@@ -168,21 +161,17 @@ class TwitchReplayRecorder {
     if (this._RingBufferCtor) return this._RingBufferCtor;
 
     const url = chrome.runtime.getURL('rollingReplay.js');
-    console.log('[TSR] Importing ring buffer from:', url);
 
     let mod;
     try {
       mod = await import(url);
     } catch (e) {
-      console.error(
-        '[TSR] Dynamic import FAILED. Likely web_accessible_resources.',
-        e
-      );
+      console.warn('[TSR] Could not load ring buffer module.', e);
       throw e;
     }
 
     const ctor = mod.default || mod.RollingReplayBuffer || mod.WebCodecsRingBuffer;
-    if (!ctor) throw new Error('[TSR] No export found. Expected default export.');
+    if (!ctor) throw new Error('[TSR] No export found in rollingReplay.js.');
 
     this._RingBufferCtor = ctor;
     return ctor;
@@ -193,18 +182,14 @@ class TwitchReplayRecorder {
     if (this.initializationInProgress) return false;
 
     this.initializationInProgress = true;
-    console.log('[TSR] Starting initialization with delay...');
 
     try {
       await new Promise((resolve) => setTimeout(resolve, 2000));
 
-      console.log('[TSR] Checking for ads before initialization...');
       await this.waitForAdToFinish();
-      console.log('[TSR] No ads playing, proceeding with initialization');
 
       const videoElement = document.querySelector('video');
       if (!videoElement) {
-        console.warn('[TSR] No video element found.');
         return false;
       }
 
@@ -212,7 +197,6 @@ class TwitchReplayRecorder {
 
       // Wait until enough data is buffered
       if (videoElement.readyState < 3) {
-        console.log('[TSR] Video not ready yet, waiting for data...');
         await new Promise((resolve) => {
           const check = () => {
             if (!this.videoElement || videoElement !== this.videoElement) return resolve();
@@ -233,14 +217,11 @@ class TwitchReplayRecorder {
       const durationSec = Number(this.settings.replayDuration || 30);
       const bitrate = 2_500_000;
 
-      console.log(`[TSR] Starting ring buffer: duration=${durationSec}s bitrate=${bitrate}`);
       this.ringBuffer = new RingBuffer(durationSec, bitrate);
 
       const ok = await this.ringBuffer.start(videoElement);
-      console.log('[TSR] ringBuffer.start() returned:', ok);
 
       if (!ok) {
-        console.warn('[TSR] Failed to start ring buffer');
         this.ringBuffer = null;
         return false;
       }
@@ -248,7 +229,7 @@ class TwitchReplayRecorder {
       this.setupAdCheckInterval();
       return true;
     } catch (e) {
-      console.error('[TSR] initialize() failed:', e);
+      console.warn('[TSR] Initialization failed, will retry on next trigger.', e);
       return false;
     } finally {
       this.initializationInProgress = false;
@@ -261,10 +242,8 @@ class TwitchReplayRecorder {
 
     this.adCheckInterval = setInterval(async () => {
       if (this.isAdPlaying()) {
-        console.log('[TSR] Ad detected, pausing buffer');
         this.pauseAllRecorders();
         await this.waitForAdToFinish();
-        console.log('[TSR] Ad finished, resuming buffer');
         this.resumeAllRecorders();
       }
     }, 1000);
@@ -302,13 +281,10 @@ class TwitchReplayRecorder {
 
   // Build + show replay from buffer
   async playReplay() {
-    if (this.isReplaying) {
-      console.log('[TSR] Replay already in progress');
-      return;
-    }
+    if (this.isReplaying) return;
 
     if (!this.ringBuffer) {
-      console.warn('[TSR] Ring buffer not initialized yet');
+      console.warn('[TSR] Ring buffer not ready yet — try again in a moment.');
       return;
     }
 
@@ -329,11 +305,10 @@ class TwitchReplayRecorder {
     try {
       blob = await this.ringBuffer.getReplayBlob();
     } catch (e) {
-      console.error('[TSR] Failed to create replay blob:', e);
+      console.warn('[TSR] Could not create replay clip.', e);
     }
 
     if (!blob) {
-      console.warn('[TSR] Replay blob was null');
       this.isReplaying = false;
       if (this.videoElement) this.videoElement.volume = originalVolume;
       return;
@@ -345,8 +320,6 @@ class TwitchReplayRecorder {
 
   // Tear down everything on nav/video swap
   destroy() {
-    console.log('[TSR] Destroying replay system');
-
     if (this.adCheckInterval) {
       clearInterval(this.adCheckInterval);
       this.adCheckInterval = null;
@@ -471,7 +444,7 @@ class TwitchReplayRecorder {
 
             <div class="twitch-replay-controls-row">
               <div class="twitch-replay-controls-left">
-                <button class="twitch-replay-play" title="Play/Pause">▶</button>
+                <button class="twitch-replay-play" title="Play/Pause" style="padding-left:2px">▶</button>
               </div>
 
               <div class="twitch-replay-time-display">
@@ -607,7 +580,9 @@ class TwitchReplayRecorder {
         progressBar.style.width = `${Math.min(percent, 100)}%`;
       }
 
-      playBtn.textContent = video.paused ? '▶' : '⏸';
+      const isPaused = video.paused;
+      playBtn.textContent = isPaused ? '▶' : '⏸';
+      playBtn.style.paddingLeft = isPaused ? '2px' : '0px';
       this._replayRaf = requestAnimationFrame(updateLoop);
     };
 
@@ -766,7 +741,7 @@ class TwitchReplayRecorder {
     try {
       await chrome.storage.local.set({ replayWindowPosition: position });
     } catch (e) {
-      console.error('[Twitch Replay] Failed to save window position:', e);
+      console.warn('[Twitch Replay] Could not save window position.', e);
     }
   }
 
