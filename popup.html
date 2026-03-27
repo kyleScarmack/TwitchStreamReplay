@@ -13,26 +13,32 @@
 
     /* Theme variables */
     :root {
-      --bg: #0e0e10;
+      --bg: #0f0f13;
       --surface: #18181b;
-      --border: #2a2a2f;
+      --surface-2: #232329;
+      --border: #2f2f38;
       --text: #efeff1;
-      --muted: #6e6e78;
+      --muted: #9a9aa3;
       --purple: #9147ff;
-      --purple-dim: rgba(145, 71, 255, 0.14);
+      --purple-strong: #7a3ff2;
+      --purple-dim: rgba(145, 71, 255, 0.16);
       --white-dim: rgba(255,255,255,0.05);
     }
 
     /* Popup container */
     body {
-      width: 320px;
-      background: var(--bg);
+      width: 352px;
+      background:
+        linear-gradient(180deg, rgba(145, 71, 255, 0.11), rgba(145, 71, 255, 0) 28%),
+        var(--bg);
       color: var(--text);
       font-family: 'DM Sans', -apple-system, sans-serif;
       font-size: 13px;
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.06);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
     }
 
     /* Header */
@@ -59,10 +65,10 @@
 
     /* Main content area */
     .content {
-      padding: 11px 14px;
+      padding: 13px 16px;
       display: flex;
       flex-direction: column;
-      gap: 9px;
+      gap: 11px;
     }
 
     /* Section label */
@@ -79,15 +85,16 @@
     .slider-row {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 10px 12px;
+      border-radius: 12px;
+      padding: 12px 14px 14px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
     }
 
     .slider-top {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 9px;
+      margin-bottom: 12px;
       gap: 8px;
     }
 
@@ -137,49 +144,54 @@
     /* Range slider */
     input[type="range"] {
       width: 100%;
-      height: 4px;
+      height: 12px;
       -webkit-appearance: none;
       appearance: none;
       background: linear-gradient(to right,
         var(--purple) 0%,
         var(--purple) var(--pct, 45%),
-        var(--border) var(--pct, 45%),
-        var(--border) 100%);
-      border-radius: 2px;
+        var(--surface-2) var(--pct, 45%),
+        var(--surface-2) 100%);
+      border-radius: 999px;
       outline: none;
+      cursor: pointer;
     }
 
     /* Slider thumb (WebKit) */
     input[type="range"]::-webkit-slider-thumb {
       -webkit-appearance: none;
-      width: 14px;
-      height: 14px;
-      background: #fff;
+      width: 16px;
+      height: 16px;
+      background: var(--purple);
       border-radius: 50%;
       cursor: pointer;
-      box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--purple);
+      border: 2px solid #fff;
+      box-shadow: 0 0 0 4px rgba(145, 71, 255, 0.22);
       transition: transform 0.1s;
+      cursor: pointer;
     }
 
     input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.15); }
 
     /* Slider thumb (Firefox) */
     input[type="range"]::-moz-range-thumb {
-      width: 14px;
-      height: 14px;
-      background: #fff;
+      width: 16px;
+      height: 16px;
+      background: var(--purple);
       border-radius: 50%;
       cursor: pointer;
-      border: none;
-      box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--purple);
+      border: 2px solid #fff;
+      box-shadow: 0 0 0 4px rgba(145, 71, 255, 0.22);
+      cursor: pointer;
     }
 
     /* Key binding section */
     .key-row {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: 12px;
       padding: 10px 12px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
     }
 
     .key-capture-btn {
@@ -187,15 +199,15 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      background: var(--bg);
+      background: var(--surface-2);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: 999px;
       padding: 7px 10px;
       cursor: pointer;
-      transition: border-color 0.15s;
+      transition: border-color 0.15s, transform 0.15s, background 0.15s;
     }
 
-    .key-capture-btn:hover { border-color: var(--purple); }
+    .key-capture-btn:hover { border-color: var(--purple); background: #2a2a33; transform: translateY(-1px); }
 
     /* Listening state animation */
     .key-capture-btn.listening {
@@ -227,8 +239,9 @@
     .toggles {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: 12px;
       overflow: hidden;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
     }
 
     .toggle-item {
@@ -282,7 +295,7 @@
     button.btn {
       flex: 1;
       padding: 9px 0;
-      border-radius: 6px;
+      border-radius: 999px;
       font-family: 'DM Sans', sans-serif;
       font-size: 12px;
       font-weight: 600;
@@ -299,8 +312,12 @@
 
     .btn-reset:hover { color: var(--text); border-color: #444; }
 
-    .btn-save { background: var(--purple); color: #fff; }
-    .btn-save:hover { background: #772ce8; }
+    .btn-save {
+      background: linear-gradient(180deg, #9e63ff, var(--purple-strong));
+      color: #fff;
+      box-shadow: 0 10px 22px rgba(145, 71, 255, 0.28);
+    }
+    .btn-save:hover { filter: brightness(1.05); transform: translateY(-1px); }
 
     /* Toast notification */
     .toast {
