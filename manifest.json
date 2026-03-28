@@ -31,14 +31,6 @@
     "128": "icons/icon128.png",
     "32": "icons/icon32.png"
   },
-  "commands": {
-    "stream-replay": {
-      "suggested_key": {
-        "default": "Alt+Left"
-      },
-      "description": "Stream Replay"
-    }
-  },
   "web_accessible_resources": [
   {
     "resources": ["rollingReplay.js"],

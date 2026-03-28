@@ -34,15 +34,3 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.action.onClicked.addListener((tab) => {});
 
 console.log('Twitch Stream Replay background worker loaded');
-
-// Handles keyboard shortcut commands
-chrome.commands.onCommand.addListener(async (command) => {
-  if (command !== "stream-replay") return;
-
-  // Get current active tab
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) return;
-
-  // Tell content script to create replay
-  chrome.tabs.sendMessage(tab.id, { type: "CREATE_REPLAY" });
-});

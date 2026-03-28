@@ -9,7 +9,6 @@ class TwitchReplayRecorder {
     // State / timers
     this.listenerAdded = false;
     this.isReplaying = false;
-    this.replayRequestInProgress = false;
     this.initializationInProgress = false;
     this.timeouts = [];
     this.adCheckInterval = null;
@@ -185,8 +184,6 @@ class TwitchReplayRecorder {
     this.initializationInProgress = true;
 
     try {
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-
       await this.waitForAdToFinish();
 
       const videoElement = document.querySelector('video');
@@ -282,7 +279,7 @@ class TwitchReplayRecorder {
 
   // Build + show replay from buffer
   async playReplay() {
-    if (this.replayRequestInProgress) return;
+    if (this.isReplaying) return;
 
     if (!this.ringBuffer) {
       console.warn('[TSR] Ring buffer not ready yet — try again in a moment.');
@@ -294,7 +291,6 @@ class TwitchReplayRecorder {
       return;
     }
 
-    this.replayRequestInProgress = true;
     this.isReplaying = true;
 
     // Reduce stream volume while replay plays
@@ -308,8 +304,6 @@ class TwitchReplayRecorder {
       blob = await this.ringBuffer.getReplayBlob();
     } catch (e) {
       console.warn('[TSR] Could not create replay clip.', e);
-    } finally {
-      this.replayRequestInProgress = false;
     }
 
     if (!blob) {

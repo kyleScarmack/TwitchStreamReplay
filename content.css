@@ -1,14 +1,7 @@
 /* Floating replay window */
 .twitch-replay-window {
   --treplay-scale: 1;
-  --accent: #9147ff;
-  --accent-strong: #7a3ff2;
-  --accent-soft: rgba(145, 71, 255, 0.18);
-  --surface: #18181b;
-  --surface-2: #232329;
-  --surface-3: #2d2d35;
-  --text: #f4f4f6;
-  --muted: rgba(255, 255, 255, 0.66);
+  --purple: #9147ff;
   position: fixed;
   bottom: 20px;
   right: 20px;
@@ -16,20 +9,18 @@
   height: 320px;
   min-width: 280px;
   min-height: 200px;
-  background:
-    linear-gradient(180deg, rgba(145, 71, 255, 0.12), rgba(145, 71, 255, 0) 26%),
-    #0f0f13;
-  border-radius: 16px;
+  background: #0e0e10;
+  border-radius: 10px;
   z-index: 999999;
   box-shadow:
-    0 24px 70px rgba(0, 0, 0, 0.72),
-    0 0 0 1px rgba(255, 255, 255, 0.08),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    0 20px 60px rgba(0, 0, 0, 0.8),
+    0 0 0 1px rgba(255,255,255,0.08);
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
+/* Layout containers */
 .twitch-replay-content,
 .twitch-replay-inner {
   flex: 1;
@@ -39,11 +30,12 @@
 }
 
 .twitch-replay-inner {
-  background: #050507;
+  background: #000;
   overflow: hidden;
-  border-radius: 16px 16px 0 0;
+  border-radius: 10px 10px 0 0;
 }
 
+/* Video area */
 .twitch-replay-video-wrap {
   position: relative;
   flex: 1;
@@ -59,6 +51,7 @@
   object-fit: contain;
 }
 
+/* Header overlay */
 .twitch-replay-header {
   position: absolute;
   top: 8px;
@@ -71,32 +64,30 @@
   pointer-events: none;
 }
 
-.twitch-replay-header > * {
-  pointer-events: auto;
-}
+.twitch-replay-header > * { pointer-events: auto; }
 
+/* Status chip */
 .twitch-replay-chip {
-  background: rgba(24, 24, 27, 0.88);
+  background: rgba(0, 0, 0, 0.75);
   backdrop-filter: blur(12px);
-  border: 1px solid rgba(145, 71, 255, 0.22);
-  padding: 5px 10px;
-  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.1);
+  padding: 3px 9px;
+  border-radius: 100px;
   display: flex;
   align-items: center;
   gap: 5px;
   font-size: 10px;
-  font-weight: 700;
-  color: var(--text);
+  font-weight: 600;
+  color: rgba(255,255,255,0.85);
   letter-spacing: 0.3px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
+/* Pulsing live dot */
 .twitch-replay-live-dot {
-  width: 6px;
-  height: 6px;
-  background: var(--accent);
+  width: 5px;
+  height: 5px;
+  background: var(--purple);
   border-radius: 50%;
-  box-shadow: 0 0 0 5px rgba(145, 71, 255, 0.16);
   animation: treplay-pulse 2s infinite;
 }
 
@@ -105,87 +96,84 @@
   50% { opacity: 0.35; }
 }
 
+/* Close button */
 .twitch-replay-close {
-  width: 28px;
-  height: 28px;
-  border-radius: 999px;
-  background: rgba(24, 24, 27, 0.92);
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.7);
   backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: var(--muted);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.65);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: transform 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 
 .twitch-replay-close:hover {
-  background: rgba(145, 71, 255, 0.24);
-  color: #fff;
-  transform: scale(1.05);
+  background: rgba(220, 50, 50, 0.85);
+  color: white;
 }
 
+/* Controls panel */
 .twitch-replay-controls-panel {
-  padding: 10px 12px 12px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0)),
-    var(--surface);
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 8px 12px 10px;
+  background: #0e0e10;
+  border-top: 1px solid rgba(255,255,255,0.07);
 }
 
+/* Seek bar */
 .twitch-replay-seek-wrapper {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   position: relative;
-  height: 8px;
-  padding: 1px 0;
+  height: 4px;
 }
 
 .twitch-replay-seek-buffer {
   position: absolute;
   height: 100%;
-  background: var(--surface-3);
-  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
   width: 0%;
 }
 
 .twitch-replay-seek-progress {
   position: absolute;
   height: 100%;
-  background: linear-gradient(90deg, var(--accent-strong), var(--accent));
-  border-radius: 999px;
+  background: var(--purple);
+  border-radius: 2px;
   width: 0%;
   z-index: 1;
-  box-shadow: 0 0 18px rgba(145, 71, 255, 0.32);
 }
 
+/* Invisible slider input */
 .twitch-replay-seek {
   position: absolute;
   width: 100%;
-  height: 8px;
-  background: rgba(255, 255, 255, 0.02);
-  border-radius: 999px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 2px;
   cursor: pointer;
   appearance: none;
   outline: none;
   z-index: 2;
 }
 
+/* Slider thumb */
 .twitch-replay-seek::-webkit-slider-thumb {
   appearance: none;
-  width: 15px;
-  height: 15px;
-  background: var(--accent);
+  width: 12px;
+  height: 12px;
+  background: white;
   border-radius: 50%;
   margin-top: -4px;
-  border: 2px solid #fff;
-  box-shadow: 0 0 0 4px rgba(145, 71, 255, 0.22);
+  box-shadow: 0 0 0 2px rgba(145, 71, 255, 0.5);
 }
 
-.twitch-replay-seek::-webkit-slider-thumb:hover {
-  transform: scale(1.2);
-}
+.twitch-replay-seek::-webkit-slider-thumb:hover { transform: scale(1.2); }
 
+/* Controls row */
 .twitch-replay-controls-row {
   position: relative;
   display: flex;
@@ -194,6 +182,7 @@
   gap: 10px;
 }
 
+/* Left / right control groups */
 .twitch-replay-controls-left,
 .twitch-replay-controls-right {
   display: flex;
@@ -201,53 +190,32 @@
   gap: 8px;
 }
 
-.twitch-replay-controls-right {
-  margin-left: auto;
-}
+.twitch-replay-controls-right { margin-left: auto; }
 
+/* All buttons — circular purple */
 .twitch-replay-play,
 .twitch-replay-mute,
 .twitch-replay-speed {
-  min-width: calc(36px * var(--treplay-scale));
-  height: calc(34px * var(--treplay-scale));
-  padding: 0 12px;
-  border-radius: 999px;
-  background: var(--surface-2);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: var(--text);
+  width: calc(28px * var(--treplay-scale));
+  height: calc(28px * var(--treplay-scale));
+  border-radius: 50%;
+  background: var(--purple);
+  border: none;
+  color: white;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   overflow: hidden;
   line-height: 1;
-  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
-.twitch-replay-play {
-  background: linear-gradient(180deg, #9e63ff, #7b42f3);
-  border-color: rgba(145, 71, 255, 0.55);
-  box-shadow:
-    0 10px 24px rgba(145, 71, 255, 0.25),
-    inset 0 1px 0 rgba(255, 255, 255, 0.22);
-}
-
+/* Shared hover + active */
 .twitch-replay-play:hover,
 .twitch-replay-mute:hover,
 .twitch-replay-speed:hover {
+  background: #772ce8;
   transform: scale(1.08);
-}
-
-.twitch-replay-play:hover {
-  background: linear-gradient(180deg, #a56cff, #854cf9);
-}
-
-.twitch-replay-mute:hover,
-.twitch-replay-speed:hover {
-  background: #2c2c34;
-  border-color: rgba(145, 71, 255, 0.42);
-  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.22);
 }
 
 .twitch-replay-play:active,
@@ -256,43 +224,41 @@
   transform: scale(0.95);
 }
 
+/* Play/pause nudge handled in JS per-state */
+
+/* Icon sizing */
 .twitch-replay-mute svg {
   width: calc(16px * var(--treplay-scale));
   height: calc(16px * var(--treplay-scale));
 }
 
+/* Speed button — monospace to match time display, !important to beat Twitch page styles */
 .twitch-replay-window .twitch-replay-speed,
 .twitch-replay-window .twitch-replay-speed:not(:hover) {
-  font-family: "SF Mono", "Consolas", monospace !important;
+  font-family: 'SF Mono', 'Consolas', monospace !important;
   font-size: calc(11px * var(--treplay-scale)) !important;
-  font-weight: 600 !important;
-  letter-spacing: -0.3px !important;
+  font-weight: 500 !important;
+  letter-spacing: -0.5px !important;
   line-height: 1 !important;
 }
 
+/* Centered time display */
 .twitch-replay-time-display {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   gap: 4px;
-  font-family: "SF Mono", "Consolas", monospace;
+  font-family: 'SF Mono', 'Consolas', monospace;
   font-size: 11px;
   pointer-events: none;
 }
 
-.twitch-replay-current {
-  color: rgba(255, 255, 255, 0.92);
-}
+.twitch-replay-current { color: rgba(255,255,255,0.9); }
+.twitch-replay-separator { color: rgba(255,255,255,0.2); }
+.twitch-replay-duration { color: rgba(255,255,255,0.3); }
 
-.twitch-replay-separator {
-  color: rgba(255, 255, 255, 0.25);
-}
-
-.twitch-replay-duration {
-  color: rgba(255, 255, 255, 0.45);
-}
-
+/* Resize handle */
 .twitch-replay-resize {
   position: absolute;
   bottom: 0;
@@ -300,10 +266,11 @@
   width: 14px;
   height: 14px;
   cursor: nwse-resize;
-  background: linear-gradient(135deg, transparent 50%, rgba(145, 71, 255, 0.45) 50%);
-  border-bottom-right-radius: 16px;
+  background: linear-gradient(135deg, transparent 50%, rgba(145, 71, 255, 0.4) 50%);
+  border-bottom-right-radius: 10px;
 }
 
+/* Fullscreen positioning */
 [fullscreen] .twitch-replay-window,
 :-webkit-full-screen .twitch-replay-window,
 :-moz-full-screen .twitch-replay-window {

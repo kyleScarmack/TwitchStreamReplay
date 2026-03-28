@@ -1,8 +1,9 @@
 // rollingReplay.js
+//
+// Records in 1-second timeslice chunks into a rolling window.
+// On trigger: stops the recorder, slices the window to maxSeconds,
+// builds one clean WebM blob, then restarts recording immediately.
 
-// Rolling MediaRecorder buffer that keeps the most recent chunks in memory and
-// can flush the current partial chunk on demand so the replay reaches the exact
-// moment the user triggered it.
 export default class SegmentRotatingReplayBuffer {
   constructor(maxSeconds = 30, videoBitrate = 2_500_000) {
     this.maxSeconds = Number(maxSeconds) || 30;
@@ -15,15 +16,9 @@ export default class SegmentRotatingReplayBuffer {
     this._recorder = null;
     this._mimeType = "";
 
-    this._chunkTimesliceMs = 250;
-    this._chunks = [];
-    this._lastChunkAt = 0;
-    this._manualBoundaryInProgress = null;
-    this._pendingChunkTimestamp = null;
-    this._pendingBoundaryResolve = null;
-    this._recordingStartedAt = 0;
-    this._pausedAt = 0;
-    this._pausedTotalMs = 0;
+    // Rolling window: each entry is { blob: Blob, duration: number (ms) }
+    this._window = [];
+    this._windowMs = 0;
   }
 
   async start(videoElement) {
@@ -35,85 +30,55 @@ export default class SegmentRotatingReplayBuffer {
     this._stream = stream;
     this.running = true;
     this.paused = false;
-    this._chunks = [];
-    this._lastChunkAt = 0;
-    this._pendingChunkTimestamp = null;
-    this._pendingBoundaryResolve = null;
-    this._recordingStartedAt = Date.now();
-    this._pausedAt = 0;
-    this._pausedTotalMs = 0;
 
     return this._startRecorder();
   }
 
   hasData() {
-    return this.getAvailableDuration() >= Math.min(this.maxSeconds, 1);
-  }
-
-  getAvailableDuration() {
-    if (!this.running || !this._recordingStartedAt) return 0;
-
-    const now = Date.now();
-    const pausedMs = this.paused && this._pausedAt ? now - this._pausedAt : 0;
-    const elapsedMs = now - this._recordingStartedAt - this._pausedTotalMs - pausedMs;
-    return Math.max(0, Math.min(this.maxSeconds, elapsedMs / 1000));
+    return this._window.length > 1; // need at least header + one data chunk
   }
 
   async getReplayBlob() {
-    if (!this.running || !this._recorder) return null;
+    if (!this.running) return null;
 
-    const boundaryAt = Date.now();
-    await this._captureBoundary(boundaryAt);
-    this._pruneChunks(boundaryAt);
+    // Flush whatever is currently buffered in the recorder right now
+    const flushedChunks = await this._flushAndRestart();
 
-    const cutoff = boundaryAt - this.maxSeconds * 1000;
-    const blobs = this._chunks
-      .filter((chunk) => chunk.at >= cutoff && chunk.at <= boundaryAt && chunk.blob && chunk.blob.size > 0)
-      .map((chunk) => chunk.blob);
+    // Combine window blobs + flushed chunks into one continuous WebM
+    const allChunks = [
+      ...this._window.map(e => e.blob),
+      ...flushedChunks,
+    ];
 
-    if (!blobs.length) return null;
-    return new Blob(blobs, { type: this._mimeType || "video/webm" });
+    if (allChunks.length === 0) return null;
+
+    return new Blob(allChunks, { type: this._mimeType || "video/webm" });
   }
 
   pause() {
     this.paused = true;
-    if (!this._pausedAt) this._pausedAt = Date.now();
     try {
-      if (this._recorder && this._recorder.state === "recording") this._recorder.pause();
+      if (this._recorder?.state === "recording") this._recorder.pause();
     } catch (_) {}
   }
 
   resume() {
     this.paused = false;
-    if (this._pausedAt) {
-      this._pausedTotalMs += Date.now() - this._pausedAt;
-      this._pausedAt = 0;
-    }
     try {
-      if (this._recorder && this._recorder.state === "paused") this._recorder.resume();
+      if (this._recorder?.state === "paused") this._recorder.resume();
     } catch (_) {}
   }
 
   stop() {
     this.running = false;
     this.paused = false;
-
     try {
-      if (this._recorder && (this._recorder.state === "recording" || this._recorder.state === "paused")) {
-        this._recorder.stop();
-      }
+      if (this._recorder && this._recorder.state !== "inactive") this._recorder.stop();
     } catch (_) {}
-
     this._recorder = null;
     this._stream = null;
-    this._chunks = [];
-    this._lastChunkAt = 0;
-    this._manualBoundaryInProgress = null;
-    this._pendingChunkTimestamp = null;
-    this._pendingBoundaryResolve = null;
-    this._recordingStartedAt = 0;
-    this._pausedAt = 0;
-    this._pausedTotalMs = 0;
+    this._window = [];
+    this._windowMs = 0;
   }
 
   // ---------- internals ----------
@@ -122,10 +87,10 @@ export default class SegmentRotatingReplayBuffer {
     try {
       if (videoElement.captureStream) return videoElement.captureStream();
       if (videoElement.mozCaptureStream) return videoElement.mozCaptureStream();
-      console.warn("[TSR] captureStream() not supported in this browser.");
+      console.warn("[TSR] captureStream() not supported.");
       return null;
     } catch (e) {
-      console.warn("[TSR] captureStream() failed - video may not be ready yet.", e);
+      console.warn("[TSR] captureStream() failed.", e);
       return null;
     }
   }
@@ -139,7 +104,7 @@ export default class SegmentRotatingReplayBuffer {
       "video/webm",
     ];
     for (const mt of candidates) {
-      if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported?.(mt)) return mt;
+      if (MediaRecorder.isTypeSupported?.(mt)) return mt;
     }
     return "";
   }
@@ -148,9 +113,8 @@ export default class SegmentRotatingReplayBuffer {
     if (!this._stream) return false;
 
     const mimeType = this._pickMimeType();
-    const options = {};
+    const options = { videoBitsPerSecond: this.videoBitrate };
     if (mimeType) options.mimeType = mimeType;
-    options.videoBitsPerSecond = this.videoBitrate;
 
     let rec;
     try {
@@ -161,100 +125,67 @@ export default class SegmentRotatingReplayBuffer {
     }
 
     this._mimeType = rec.mimeType || mimeType || "video/webm";
+    let isFirstChunk = true;
 
     rec.ondataavailable = (evt) => {
-      if (!this.running) return;
-      if (!evt?.data || evt.data.size === 0) return;
+      if (!this.running || !evt?.data || evt.data.size === 0) return;
 
-      const boundaryAt = this._pendingChunkTimestamp;
-      const at = boundaryAt ?? Date.now();
-      this._pendingChunkTimestamp = null;
-      this._lastChunkAt = at;
-      this._chunks.push({ blob: evt.data, at });
-      this._pruneChunks();
+      const chunkMs = 1000;
+      this._window.push({ blob: evt.data, duration: isFirstChunk ? 0 : chunkMs });
+      if (!isFirstChunk) this._windowMs += chunkMs;
+      isFirstChunk = false;
 
-      if (this._pendingBoundaryResolve && boundaryAt && at >= boundaryAt) {
-        const resolve = this._pendingBoundaryResolve;
-        this._pendingBoundaryResolve = null;
-        resolve();
+      // Trim window to maxSeconds — always keep index 0 (WebM header chunk)
+      const maxMs = this.maxSeconds * 1000;
+      while (this._window.length > 2 && this._windowMs - this._window[1].duration > maxMs) {
+        this._windowMs -= this._window[1].duration;
+        this._window.splice(1, 1);
       }
     };
 
     rec.onerror = (evt) => {
-      console.warn("[TSR] MediaRecorder encountered an error.", evt?.error || evt);
-    };
-
-    rec.onstop = () => {
-      const wasCurrentRecorder = this._recorder === rec;
-      if (wasCurrentRecorder) this._recorder = null;
-      if (!wasCurrentRecorder) return;
-      if (!this.running) return;
-      if (this._manualBoundaryInProgress) return;
-      this._startRecorder();
+      console.warn("[TSR] MediaRecorder error.", evt?.error || evt);
     };
 
     this._recorder = rec;
 
     try {
-      rec.start(this._chunkTimesliceMs);
+      rec.start(1000); // deliver a chunk every 1 second
       return true;
     } catch (e) {
-      console.warn("[TSR] MediaRecorder.start() failed - stream may not be ready.", e);
+      console.warn("[TSR] MediaRecorder.start() failed.", e);
       this._recorder = null;
       return false;
     }
   }
 
-  _pruneChunks(referenceTime = Date.now()) {
-    const keepAfter = referenceTime - this.maxSeconds * 1000 - this._chunkTimesliceMs * 2;
-    this._chunks = this._chunks.filter((chunk) => chunk.at >= keepAfter);
-  }
+  // Stop current recorder, collect any last chunks it was holding, restart immediately.
+  _flushAndRestart() {
+    return new Promise((resolve) => {
+      const rec = this._recorder;
+      if (!rec || rec.state === "inactive") {
+        resolve([]);
+        return;
+      }
 
-  async _captureBoundary(boundaryAt) {
-    if (this._manualBoundaryInProgress) {
-      await this._manualBoundaryInProgress;
-      return;
-    }
-    if (!this._recorder || this._recorder.state !== "recording") return;
+      const finalChunks = [];
+      const origOnData = rec.ondataavailable;
 
-    const recorder = this._recorder;
-    this._pendingChunkTimestamp = boundaryAt;
-
-    this._manualBoundaryInProgress = new Promise((resolve) => {
-      const cleanup = () => {
-        recorder.removeEventListener("stop", handleStop);
-        this._manualBoundaryInProgress = null;
-        resolve();
+      rec.ondataavailable = (evt) => {
+        origOnData?.call(rec, evt); // still feed the rolling window
+        if (evt?.data && evt.data.size > 0) finalChunks.push(evt.data);
       };
 
-      const handleStop = () => {
-        const waitForBoundaryChunk = new Promise((finish) => {
-          if (this._lastChunkAt >= boundaryAt) return finish();
-          this._pendingBoundaryResolve = finish;
-          setTimeout(() => {
-            if (this._pendingBoundaryResolve === finish) {
-              this._pendingBoundaryResolve = null;
-              finish();
-            }
-          }, 400);
-        });
-
-        waitForBoundaryChunk.finally(() => {
-          if (this.running) this._startRecorder();
-          cleanup();
-        });
-      };
-
-      recorder.addEventListener("stop", handleStop, { once: true });
+      rec.addEventListener("stop", () => {
+        if (this.running && !this.paused) this._startRecorder();
+        resolve(finalChunks);
+      }, { once: true });
 
       try {
-        recorder.stop();
-      } catch (_) {
-        this._pendingChunkTimestamp = null;
-        cleanup();
+        rec.stop();
+      } catch (e) {
+        resolve([]);
       }
     });
-
-    await this._manualBoundaryInProgress;
   }
 }
