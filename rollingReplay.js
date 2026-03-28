@@ -1,191 +1,421 @@
-// rollingReplay.js
-//
-// Records in 1-second timeslice chunks into a rolling window.
-// On trigger: stops the recorder, slices the window to maxSeconds,
-// builds one clean WebM blob, then restarts recording immediately.
+import {
+  BufferTarget,
+  EncodedAudioPacketSource,
+  EncodedPacket,
+  EncodedVideoPacketSource,
+  Output,
+  WebMOutputFormat,
+} from "./vendor/mediabunny.min.mjs";
 
-export default class SegmentRotatingReplayBuffer {
-  constructor(maxSeconds = 30, videoBitrate = 2_500_000) {
-    this.maxSeconds = Number(maxSeconds) || 30;
-    this.videoBitrate = Number(videoBitrate) || 2_500_000;
+export default class WebCodecsRingBuffer {
+  constructor(maxSeconds = 30, videoBitrate = 4_000_000) {
+    this.maxSeconds = Math.max(5, Number(maxSeconds) || 30);
+    this.videoBitrate = Math.max(250_000, Number(videoBitrate) || 4_000_000);
+
+    this.videoChunks = [];
+    this.audioChunks = [];
+
+    this.videoEncoder = null;
+    this.audioEncoder = null;
+    this.videoReader = null;
+    this.audioReader = null;
+    this.audioContext = null;
+
+    this.videoWidth = 0;
+    this.videoHeight = 0;
+    this.sampleRate = 48_000;
+    this.numberOfChannels = 2;
+
+    this.firstVideoMeta = null;
+    this.firstAudioMeta = null;
 
     this.running = false;
     this.paused = false;
-
-    this._stream = null;
-    this._recorder = null;
-    this._mimeType = "";
-
-    // Rolling window: each entry is { blob: Blob, duration: number (ms) }
-    this._window = [];
-    this._windowMs = 0;
+    this.audioEncoderConfigured = false;
+    this.startTime = 0;
+    this.lastEncodedAt = 0;
   }
 
   async start(videoElement) {
-    if (!videoElement) return false;
-
     const stream = this._capture(videoElement);
     if (!stream) return false;
 
-    this._stream = stream;
+    const videoTrack = stream.getVideoTracks?.()[0];
+    const audioTrack = stream.getAudioTracks?.()[0];
+
+    if (!videoTrack) {
+      console.warn("[TSR] No video track found in captureStream().");
+      return false;
+    }
+
+    this.videoWidth = videoElement.videoWidth || 1280;
+    this.videoHeight = videoElement.videoHeight || 720;
     this.running = true;
     this.paused = false;
+    this.startTime = performance.now();
+    this.lastEncodedAt = this.startTime;
 
-    return this._startRecorder();
+    this.videoEncoder = new VideoEncoder({
+      output: (chunk, meta) => {
+        const buf = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(buf);
+
+        if (!this.firstVideoMeta && meta?.decoderConfig) {
+          this.firstVideoMeta = meta;
+        }
+
+        const timestamp =
+          Number.isFinite(chunk.timestamp) ? chunk.timestamp : Math.round((performance.now() - this.startTime) * 1000);
+        this.videoChunks.push({
+          data: buf,
+          timestamp,
+          duration: chunk.duration || 33_333,
+          isKey: chunk.type === "key",
+        });
+        this.lastEncodedAt = performance.now();
+        this._trimVideo();
+      },
+      error: (e) => console.error("[TSR] VideoEncoder error:", e),
+    });
+
+    this.videoEncoder.configure({
+      codec: "vp8",
+      width: this.videoWidth,
+      height: this.videoHeight,
+      bitrate: this.videoBitrate,
+      framerate: 30,
+    });
+
+    if (audioTrack) {
+      this.audioEncoder = new AudioEncoder({
+        output: (chunk, meta) => {
+          const buf = new Uint8Array(chunk.byteLength);
+          chunk.copyTo(buf);
+
+          if (!this.firstAudioMeta && meta?.decoderConfig) {
+            this.firstAudioMeta = meta;
+          }
+
+          const timestamp =
+            Number.isFinite(chunk.timestamp) ? chunk.timestamp : Math.round((performance.now() - this.startTime) * 1000);
+          this.audioChunks.push({
+            data: buf,
+            timestamp,
+            duration: chunk.duration || 20_000,
+            isKey: chunk.type === "key",
+          });
+          this.lastEncodedAt = performance.now();
+          this._trimAudio();
+        },
+        error: (e) => console.error("[TSR] AudioEncoder error:", e),
+      });
+
+      try {
+        this.audioContext = new AudioContext({ sampleRate: 48_000 });
+        const source = this.audioContext.createMediaStreamSource(new MediaStream([audioTrack]));
+        const gainNode = this.audioContext.createGain();
+        gainNode.channelCount = 2;
+        gainNode.channelCountMode = "explicit";
+        gainNode.channelInterpretation = "speakers";
+        source.connect(gainNode);
+        const dest = this.audioContext.createMediaStreamDestination();
+        gainNode.connect(dest);
+
+        const stereoTrack = dest.stream.getAudioTracks?.()[0];
+        if (stereoTrack) {
+          const audioProcessor = new MediaStreamTrackProcessor({ track: stereoTrack });
+          this.audioReader = audioProcessor.readable.getReader();
+          this._processAudioFrames();
+        }
+      } catch (e) {
+        console.warn("[TSR] Audio processing unavailable; replay will be video-only.", e);
+        this.audioEncoder = null;
+      }
+    }
+
+    const videoProcessor = new MediaStreamTrackProcessor({ track: videoTrack });
+    this.videoReader = videoProcessor.readable.getReader();
+    this._processVideoFrames();
+
+    return true;
   }
 
   hasData() {
-    return this._window.length > 1; // need at least header + one data chunk
+    return this.videoChunks.length > 0;
+  }
+
+  isLikelyStale(maxStallMs = 5000) {
+    if (!this.running || this.paused) return false;
+    if (!this.lastEncodedAt) return false;
+    return performance.now() - this.lastEncodedAt > maxStallMs;
+  }
+
+  getBufferedDurationSeconds() {
+    if (this.videoChunks.length < 2) return 0;
+    const first = this.videoChunks[0].timestamp;
+    const last = this.videoChunks[this.videoChunks.length - 1].timestamp;
+    return Math.max(0, (last - first) / 1_000_000);
+  }
+
+  async getReplay() {
+    const blob = await this.getReplayBlob();
+    if (!blob) return null;
+
+    const durationSeconds = this._estimateReplayDurationSeconds();
+    return {
+      blob,
+      mimeType: "video/webm",
+      durationSeconds,
+    };
   }
 
   async getReplayBlob() {
-    if (!this.running) return null;
+    if (this.videoChunks.length === 0) {
+      console.warn("[TSR] No video data available for replay.");
+      return null;
+    }
 
-    // Flush whatever is currently buffered in the recorder right now
-    const flushedChunks = await this._flushAndRestart();
+    try {
+      if (this.videoEncoder?.state === "configured") {
+        await this.videoEncoder.flush();
+      }
+      if (this.audioEncoder?.state === "configured") {
+        await this.audioEncoder.flush();
+      }
+    } catch (e) {
+      console.warn("[TSR] Encoder flush failed before mux.", e);
+    }
 
-    // Combine window blobs + flushed chunks into one continuous WebM
-    const allChunks = [
-      ...this._window.map(e => e.blob),
-      ...flushedChunks,
-    ];
+    const latestTimestamp = this.videoChunks[this.videoChunks.length - 1].timestamp;
+    const cutoff = latestTimestamp - this.maxSeconds * 1_000_000;
 
-    if (allChunks.length === 0) return null;
+    let startIdx = this.videoChunks.findIndex((chunk) => chunk.isKey && chunk.timestamp >= cutoff);
+    if (startIdx < 0) {
+      startIdx = this.videoChunks.findIndex((chunk) => chunk.isKey);
+    }
+    if (startIdx < 0) {
+      console.warn("[TSR] No keyframe found in replay buffer.");
+      return null;
+    }
 
-    return new Blob(allChunks, { type: this._mimeType || "video/webm" });
+    const videoSlice = this.videoChunks.slice(startIdx);
+    if (videoSlice.length === 0) return null;
+
+    const baseTimestamp = videoSlice[0].timestamp;
+    const endTimestamp = videoSlice[videoSlice.length - 1].timestamp;
+
+    const audioSlice = this.audioChunks.filter(
+      (chunk) => chunk.timestamp >= baseTimestamp && chunk.timestamp <= endTimestamp
+    );
+
+    try {
+      const videoSource = new EncodedVideoPacketSource("vp8");
+      const audioSource = audioSlice.length > 0 ? new EncodedAudioPacketSource("opus") : null;
+      const target = new BufferTarget();
+      const output = new Output({
+        format: new WebMOutputFormat(),
+        target,
+      });
+
+      output.addVideoTrack(videoSource, { frameRate: 30 });
+      if (audioSource) output.addAudioTrack(audioSource);
+
+      await output.start();
+
+      for (let i = 0; i < videoSlice.length; i += 1) {
+        const chunk = videoSlice[i];
+        const packet = new EncodedPacket(
+          chunk.data,
+          chunk.isKey ? "key" : "delta",
+          (chunk.timestamp - baseTimestamp) / 1_000_000,
+          Math.max(0.001, (chunk.duration || 33_333) / 1_000_000)
+        );
+        const meta = i === 0 ? this.firstVideoMeta : undefined;
+        await videoSource.add(packet, meta);
+      }
+
+      if (audioSource) {
+        for (let i = 0; i < audioSlice.length; i += 1) {
+          const chunk = audioSlice[i];
+          const packet = new EncodedPacket(
+            chunk.data,
+            chunk.isKey ? "key" : "delta",
+            (chunk.timestamp - baseTimestamp) / 1_000_000,
+            Math.max(0.001, (chunk.duration || 20_000) / 1_000_000)
+          );
+          const meta = i === 0 ? this.firstAudioMeta : undefined;
+          await audioSource.add(packet, meta);
+        }
+      }
+
+      await output.finalize();
+      return new Blob([target.buffer], { type: "video/webm" });
+    } catch (e) {
+      console.error("[TSR] Error creating replay blob:", e);
+      return null;
+    }
   }
 
   pause() {
     this.paused = true;
-    try {
-      if (this._recorder?.state === "recording") this._recorder.pause();
-    } catch (_) {}
   }
 
   resume() {
     this.paused = false;
-    try {
-      if (this._recorder?.state === "paused") this._recorder.resume();
-    } catch (_) {}
+    this.lastEncodedAt = performance.now();
   }
 
   stop() {
     this.running = false;
     this.paused = false;
-    try {
-      if (this._recorder && this._recorder.state !== "inactive") this._recorder.stop();
-    } catch (_) {}
-    this._recorder = null;
-    this._stream = null;
-    this._window = [];
-    this._windowMs = 0;
-  }
 
-  // ---------- internals ----------
+    try {
+      this.videoReader?.cancel();
+    } catch (_) {}
+    try {
+      this.audioReader?.cancel();
+    } catch (_) {}
+    try {
+      if (this.videoEncoder?.state !== "closed") this.videoEncoder.close();
+    } catch (_) {}
+    try {
+      if (this.audioEncoder?.state !== "closed") this.audioEncoder.close();
+    } catch (_) {}
+    try {
+      this.audioContext?.close();
+    } catch (_) {}
+
+    this.videoChunks = [];
+    this.audioChunks = [];
+    this.videoEncoder = null;
+    this.audioEncoder = null;
+    this.videoReader = null;
+    this.audioReader = null;
+    this.audioContext = null;
+    this.firstVideoMeta = null;
+    this.firstAudioMeta = null;
+    this.audioEncoderConfigured = false;
+    this.lastEncodedAt = 0;
+  }
 
   _capture(videoElement) {
     try {
       if (videoElement.captureStream) return videoElement.captureStream();
       if (videoElement.mozCaptureStream) return videoElement.mozCaptureStream();
-      console.warn("[TSR] captureStream() not supported.");
-      return null;
     } catch (e) {
       console.warn("[TSR] captureStream() failed.", e);
-      return null;
     }
+    console.warn("[TSR] captureStream() not supported.");
+    return null;
   }
 
-  _pickMimeType() {
-    const candidates = [
-      "video/webm;codecs=vp9,opus",
-      "video/webm;codecs=vp8,opus",
-      "video/webm;codecs=vp9",
-      "video/webm;codecs=vp8",
-      "video/webm",
-    ];
-    for (const mt of candidates) {
-      if (MediaRecorder.isTypeSupported?.(mt)) return mt;
-    }
-    return "";
-  }
 
-  _startRecorder() {
-    if (!this._stream) return false;
+  async _processVideoFrames() {
+    let frameCount = 0;
 
-    const mimeType = this._pickMimeType();
-    const options = { videoBitsPerSecond: this.videoBitrate };
-    if (mimeType) options.mimeType = mimeType;
-
-    let rec;
-    try {
-      rec = new MediaRecorder(this._stream, options);
-    } catch (e) {
-      console.warn("[TSR] MediaRecorder could not be created.", e);
-      return false;
-    }
-
-    this._mimeType = rec.mimeType || mimeType || "video/webm";
-    let isFirstChunk = true;
-
-    rec.ondataavailable = (evt) => {
-      if (!this.running || !evt?.data || evt.data.size === 0) return;
-
-      const chunkMs = 1000;
-      this._window.push({ blob: evt.data, duration: isFirstChunk ? 0 : chunkMs });
-      if (!isFirstChunk) this._windowMs += chunkMs;
-      isFirstChunk = false;
-
-      // Trim window to maxSeconds — always keep index 0 (WebM header chunk)
-      const maxMs = this.maxSeconds * 1000;
-      while (this._window.length > 2 && this._windowMs - this._window[1].duration > maxMs) {
-        this._windowMs -= this._window[1].duration;
-        this._window.splice(1, 1);
-      }
-    };
-
-    rec.onerror = (evt) => {
-      console.warn("[TSR] MediaRecorder error.", evt?.error || evt);
-    };
-
-    this._recorder = rec;
-
-    try {
-      rec.start(1000); // deliver a chunk every 1 second
-      return true;
-    } catch (e) {
-      console.warn("[TSR] MediaRecorder.start() failed.", e);
-      this._recorder = null;
-      return false;
-    }
-  }
-
-  // Stop current recorder, collect any last chunks it was holding, restart immediately.
-  _flushAndRestart() {
-    return new Promise((resolve) => {
-      const rec = this._recorder;
-      if (!rec || rec.state === "inactive") {
-        resolve([]);
-        return;
-      }
-
-      const finalChunks = [];
-      const origOnData = rec.ondataavailable;
-
-      rec.ondataavailable = (evt) => {
-        origOnData?.call(rec, evt); // still feed the rolling window
-        if (evt?.data && evt.data.size > 0) finalChunks.push(evt.data);
-      };
-
-      rec.addEventListener("stop", () => {
-        if (this.running && !this.paused) this._startRecorder();
-        resolve(finalChunks);
-      }, { once: true });
-
+    while (this.running && this.videoReader) {
       try {
-        rec.stop();
+        const { value: frame, done } = await this.videoReader.read();
+        if (done || !frame) break;
+
+        if (this.paused) {
+          frame.close();
+          continue;
+        }
+
+        const keyFrame = frameCount % 30 === 0;
+        this.videoEncoder.encode(frame, { keyFrame });
+        frame.close();
+        frameCount += 1;
       } catch (e) {
-        resolve([]);
+        if (this.running) {
+          console.error("[TSR] Error processing video frame:", e);
+        }
+        break;
       }
-    });
+    }
+  }
+
+  async _processAudioFrames() {
+    while (this.running && this.audioReader && this.audioEncoder) {
+      try {
+        const { value: audioData, done } = await this.audioReader.read();
+        if (done || !audioData) break;
+
+        if (this.paused) {
+          audioData.close();
+          continue;
+        }
+
+        if (!this.audioEncoderConfigured) {
+          this.sampleRate = audioData.sampleRate;
+          this.numberOfChannels = Math.min(2, audioData.numberOfChannels || 2);
+
+          this.audioEncoder.configure({
+            codec: "opus",
+            sampleRate: this.sampleRate,
+            numberOfChannels: this.numberOfChannels,
+            bitrate: 160_000,
+          });
+          this.audioEncoderConfigured = true;
+        }
+
+        this.audioEncoder.encode(audioData);
+        audioData.close();
+      } catch (e) {
+        if (this.running) {
+          console.error("[TSR] Error processing audio frame:", e);
+        }
+        break;
+      }
+    }
+  }
+
+  _trimVideo() {
+    if (this.videoChunks.length === 0) return;
+
+    const newest = this.videoChunks[this.videoChunks.length - 1].timestamp;
+    const cutoff = newest - this.maxSeconds * 1_000_000;
+    let trimIndex = 0;
+
+    for (let i = 0; i < this.videoChunks.length; i += 1) {
+      if (this.videoChunks[i].timestamp < cutoff && this.videoChunks[i].isKey) {
+        trimIndex = i;
+      }
+    }
+
+    if (trimIndex > 0) {
+      this.videoChunks.splice(0, trimIndex);
+    }
+  }
+
+  _trimAudio() {
+    if (this.audioChunks.length === 0) return;
+
+    const newest = this.audioChunks[this.audioChunks.length - 1].timestamp;
+    const cutoff = newest - this.maxSeconds * 1_000_000;
+    let trimIndex = 0;
+
+    for (let i = 0; i < this.audioChunks.length; i += 1) {
+      if (this.audioChunks[i].timestamp < cutoff) {
+        trimIndex = i;
+      }
+    }
+
+    if (trimIndex > 0) {
+      this.audioChunks.splice(0, trimIndex);
+    }
+  }
+
+  _estimateReplayDurationSeconds() {
+    if (this.videoChunks.length < 2) return 0;
+    const latestTimestamp = this.videoChunks[this.videoChunks.length - 1].timestamp;
+    const cutoff = latestTimestamp - this.maxSeconds * 1_000_000;
+    const startChunk =
+      this.videoChunks.find((chunk) => chunk.isKey && chunk.timestamp >= cutoff) ||
+      this.videoChunks.find((chunk) => chunk.isKey) ||
+      this.videoChunks[0];
+
+    return Math.max(0.05, (latestTimestamp - startChunk.timestamp) / 1_000_000);
   }
 }

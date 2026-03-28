@@ -286,6 +286,15 @@ class TwitchReplayRecorder {
       return;
     }
 
+    if (this.ringBuffer?.isLikelyStale?.()) {
+      console.warn('[TSR] Recorder stalled; rebuilding replay buffer.');
+      const restarted = await this.initialize();
+      if (!restarted || !this.ringBuffer?.hasData?.()) {
+        console.warn('[TSR] Replay buffer is refreshing â€” try again in a moment.');
+        return;
+      }
+    }
+
     if (!this.ringBuffer?.hasData?.()) {
       console.warn('[TSR] Buffer still filling — wait for a full clip.');
       return;
@@ -299,21 +308,20 @@ class TwitchReplayRecorder {
       this.videoElement.volume = Math.max(0, originalVolume * this.settings.volumeReduction);
     }
 
-    let blob = null;
+    let replay = null;
     try {
-      blob = await this.ringBuffer.getReplayBlob();
+      replay = await this.ringBuffer.getReplay();
     } catch (e) {
       console.warn('[TSR] Could not create replay clip.', e);
     }
 
-    if (!blob) {
+    if (!replay || !(replay.blob instanceof Blob) || replay.blob.size === 0) {
       this.isReplaying = false;
       if (this.videoElement) this.videoElement.volume = originalVolume;
       return;
     }
 
-    const url = URL.createObjectURL(blob);
-    this.showReplay(url, originalVolume);
+    this.showReplay(replay, originalVolume);
   }
 
   // Tear down everything on nav/video swap
@@ -366,140 +374,67 @@ class TwitchReplayRecorder {
   }
 
   // Build replay UI and wire controls
-  showReplay(url, originalVolume) {
+  showReplay(replay, originalVolume) {
+    const replayBlob = replay?.blob instanceof Blob ? replay.blob : null;
+    const initialDuration = Math.max(0.05, Number(replay?.durationSeconds || 0));
+
+    if (!replayBlob) {
+      this.isReplaying = false;
+      if (this.videoElement) this.videoElement.volume = originalVolume;
+      return;
+    }
+
+    let released = false;
+    const cleanupFns = [];
+    const releaseAssets = () => {
+      if (released) return;
+      released = true;
+      while (cleanupFns.length) {
+        try { cleanupFns.pop()(); } catch (_) {}
+      }
+    };
+
     let cleanupReplay = () => {
       this.isReplaying = false;
       this.closeReplay();
-      try { URL.revokeObjectURL(url); } catch (_) {}
       if (this.videoElement) this.videoElement.volume = originalVolume;
     };
 
-    // ESC to close
     const onEsc = (e) => {
       if (e.key === 'Escape') cleanupReplay();
     };
     document.addEventListener('keydown', onEsc, true);
+    this._replayEscHandler = onEsc;
 
-    // Wrap cleanup so ESC listener is removed
-    const _origCleanup = cleanupReplay;
-    cleanupReplay = () => {
-      document.removeEventListener('keydown', onEsc, true);
-      _origCleanup();
-    };
+    if (this.replayWindow) this.closeReplay();
+    this._releaseReplayAssets = releaseAssets;
 
-    // Replace any existing window
-    if (this.replayWindow) {
-      const oldVideo = this.replayWindow.querySelector('video');
-      if (oldVideo && oldVideo.src) {
-        try { URL.revokeObjectURL(oldVideo.src); } catch (_) {}
-      }
-      this.closeReplay();
-    }
-
-    // SVG speaker icon (muted/unmuted)
+    const playIcon = () =>
+      '<svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path fill="currentColor" d="M8 5v14l11-7z"></path></svg>';
+    const pauseIcon = () =>
+      '<svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path fill="currentColor" d="M7 5h4v14H7z"></path><path fill="currentColor" d="M13 5h4v14h-4z"></path></svg>';
     const speakerIcon = (muted) => {
       if (muted) {
-        return `
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path fill="currentColor" d="M3 9v6h4l5 4V5L7 9H3z"></path>
-            <path fill="currentColor" d="M16.5 8.5l4.5 4.5-1.4 1.4-4.5-4.5 1.4-1.4z"></path>
-            <path fill="currentColor" d="M21 8.5l-4.5 4.5-1.4-1.4 4.5-4.5 1.4 1.4z"></path>
-          </svg>
-        `;
+        return           '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 9v6h4l5 4V5L7 9H3z"></path><path fill="currentColor" d="M16.5 8.5l4.5 4.5-1.4 1.4-4.5-4.5 1.4-1.4z"></path><path fill="currentColor" d="M21 8.5l-4.5 4.5-1.4-1.4 4.5-4.5 1.4 1.4z"></path></svg>';
       }
-      return `
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path fill="currentColor" d="M3 9v6h4l5 4V5L7 9H3z"></path>
-          <path fill="currentColor" d="M16.5 12c0-1.8-1-3.3-2.5-4v8c1.5-.7 2.5-2.2 2.5-4z"></path>
-          <path fill="currentColor" d="M14 3.2v2.2c2.9 1 5 3.8 5 6.6s-2.1 5.6-5 6.6v2.2c4.1-1.1 7-4.8 7-8.8s-2.9-7.7-7-8.8z"></path>
-        </svg>
-      `;
+      return         '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 9v6h4l5 4V5L7 9H3z"></path><path fill="currentColor" d="M16.5 12c0-1.8-1-3.3-2.5-4v8c1.5-.7 2.5-2.2 2.5-4z"></path><path fill="currentColor" d="M14 3.2v2.2c2.9 1 5 3.8 5 6.6s-2.1 5.6-5 6.6v2.2c4.1-1.1 7-4.8 7-8.8s-2.9-7.7-7-8.8z"></path></svg>';
     };
 
     const container = document.createElement('div');
     container.className = 'twitch-replay-window';
-    container.innerHTML = `
-      <div class="twitch-replay-content">
-        <div class="twitch-replay-inner">
-          <div class="twitch-replay-video-wrap">
-            <video class="twitch-replay-video" autoplay playsinline></video>
-
-            <div class="twitch-replay-header">
-              <div class="twitch-replay-chip">
-                <div class="twitch-replay-live-dot"></div>
-                <span>Stream Replay</span>
-              </div>
-              <button class="twitch-replay-close">×</button>
-            </div>
-          </div>
-
-          <div class="twitch-replay-controls-panel">
-            <div class="twitch-replay-seek-wrapper">
-              <div class="twitch-replay-seek-buffer" style="width: 0%"></div>
-              <div class="twitch-replay-seek-progress" style="width: 0%"></div>
-              <input class="twitch-replay-seek" type="range" min="0" max="1000" value="0" step="1">
-            </div>
-
-            <div class="twitch-replay-controls-row">
-              <div class="twitch-replay-controls-left">
-                <button class="twitch-replay-play" title="Play/Pause" style="padding-left:2px">▶</button>
-              </div>
-
-              <div class="twitch-replay-time-display">
-                <span class="twitch-replay-current">0:00</span>
-                <span class="twitch-replay-separator">/</span>
-                <span class="twitch-replay-duration">0:00</span>
-              </div>
-
-              <div class="twitch-replay-controls-right">
-                <button class="twitch-replay-speed" title="Playback speed">1×</button>
-                <button class="twitch-replay-mute" title="Mute/Unmute">${speakerIcon(false)}</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="twitch-replay-resize"></div>
-    `;
+    container.innerHTML =
+      '<div class="twitch-replay-content"><div class="twitch-replay-inner"><div class="twitch-replay-video-wrap"><video class="twitch-replay-video" playsinline preload="auto"></video><div class="twitch-replay-header"><div class="twitch-replay-chip"><div class="twitch-replay-live-dot"></div><span>Stream Replay</span></div><button class="twitch-replay-close">x</button></div></div><div class="twitch-replay-controls-panel"><div class="twitch-replay-seek-wrapper"><div class="twitch-replay-seek-buffer" style="width: 100%"></div><div class="twitch-replay-seek-progress" style="width: 0%"></div><input class="twitch-replay-seek" type="range" min="0" max="1000" value="0" step="1"></div><div class="twitch-replay-controls-row"><div class="twitch-replay-controls-left"><button class="twitch-replay-play" title="Play/Pause">' + playIcon() + '</button></div><div class="twitch-replay-time-display"><span class="twitch-replay-current">0:00</span><span class="twitch-replay-separator">/</span><span class="twitch-replay-duration">0:00</span></div><div class="twitch-replay-controls-right"><button class="twitch-replay-speed" title="Playback speed">1x</button><button class="twitch-replay-mute" title="Mute/Unmute">' + speakerIcon(false) + '</button></div></div></div></div></div><div class="twitch-replay-resize"></div>';
 
     const parent = this.getOverlayParent();
     parent.appendChild(container);
     this.replayWindow = container;
 
-    // Restore saved position/size (optional)
     this.applyWindowPosition(container).then(() => {
       this.clampToViewport(container);
       this.updateUiScale(container);
     });
 
-    const WANT = Number(this.settings.replayDuration || 5);
-
-    const video = container.querySelector('video');
-    video.src = url;
-    video.volume = 1.0;
-    video.controls = false;
-
-    // Always start at 0
-    video.addEventListener(
-      'loadedmetadata',
-      () => {
-        try { video.currentTime = 0; } catch (_) {}
-      },
-      { once: true }
-    );
-
-    // Close handlers
-    container.querySelector('.twitch-replay-close').addEventListener('click', cleanupReplay);
-    video.addEventListener('error', cleanupReplay);
-
-    // Auto-close after replay ends
-    video.addEventListener('ended', () => {
-      if (!this.settings.autoCloseReplay) return;
-      setTimeout(cleanupReplay, 350);
-    });
-
-    // Controls
+    const video = container.querySelector('.twitch-replay-video');
     const playBtn = container.querySelector('.twitch-replay-play');
     const seek = container.querySelector('.twitch-replay-seek');
     const curEl = container.querySelector('.twitch-replay-current');
@@ -508,9 +443,14 @@ class TwitchReplayRecorder {
     const muteBtn = container.querySelector('.twitch-replay-mute');
     const speedBtn = container.querySelector('.twitch-replay-speed');
 
-    // Mute for replay video only
-    let prevReplayVolume = 1.0;
+    video.volume = 1.0;
+    video.controls = false;
+    video.autoplay = false;
 
+    container.querySelector('.twitch-replay-close').addEventListener('click', cleanupReplay);
+    video.addEventListener('error', cleanupReplay);
+
+    let prevReplayVolume = 1.0;
     const updateMuteIcon = () => {
       const muted = video.muted || video.volume === 0;
       if (muteBtn) muteBtn.innerHTML = speakerIcon(muted);
@@ -531,14 +471,12 @@ class TwitchReplayRecorder {
       });
     }
 
-    // Speed toggle
     const SPEEDS = [1.0, 1.5, 2.0, 0.75];
     let speedIdx = 0;
-
     const applySpeed = () => {
-      const s = SPEEDS[speedIdx];
-      video.playbackRate = s;
-      if (speedBtn) speedBtn.textContent = `${s}×`;
+      const speed = SPEEDS[speedIdx];
+      video.playbackRate = speed;
+      if (speedBtn) speedBtn.textContent = speed + 'x';
     };
 
     if (speedBtn) {
@@ -549,38 +487,173 @@ class TwitchReplayRecorder {
       });
     }
 
-    // Timeline UI uses the intended clip duration
-    const knownDuration = WANT;
-    let isScrubbing = false;
-
     const fmt = (secs) => {
       if (!isFinite(secs) || secs < 0) return '0:00';
       const s = Math.floor(secs % 60);
       const m = Math.floor(secs / 60);
-      return `${m}:${s.toString().padStart(2, '0')}`;
+      return m + ':' + s.toString().padStart(2, '0');
+    };
+    const fmtTotal = (secs) => {
+      if (!isFinite(secs) || secs < 0) return '0:00';
+      const rounded = Math.max(0, Math.round(secs));
+      const s = rounded % 60;
+      const m = Math.floor(rounded / 60);
+      return m + ':' + s.toString().padStart(2, '0');
     };
 
-    durEl.textContent = fmt(knownDuration);
-    seek.max = Math.floor(knownDuration * 1000).toString();
+    const replayUrl = URL.createObjectURL(replayBlob);
+    cleanupFns.push(() => {
+      try { URL.revokeObjectURL(replayUrl); } catch (_) {}
+    });
+
+    let clipDuration = initialDuration;
+    let isScrubbing = false;
+    let pendingSeekTime = null;
+    let seekResumePending = null;
+    let metadataReady = false;
+    let wantsPlayback = true;
+    let playbackSyncId = 0;
+    let lastDisplayedTime = 0;
+
+    durEl.textContent = fmtTotal(clipDuration);
+    seek.max = Math.max(1, Math.floor(clipDuration * 1000)).toString();
+
+    const setRelativeTime = (clipTime) => {
+      const rel = Math.min(Math.max(0, clipTime), clipDuration);
+      lastDisplayedTime = rel;
+      curEl.textContent = fmt(rel);
+      const ms = Math.floor(rel * 1000);
+      const max = parseInt(seek.max || '1000', 10);
+      seek.value = Math.min(ms, max).toString();
+      const percent = clipDuration > 0 ? (rel / clipDuration) * 100 : 0;
+      progressBar.style.width = Math.min(percent, 100) + '%';
+    };
+
+    const updatePlayIcon = () => {
+      const isActuallyPlaying = metadataReady ? (!video.paused && !video.ended) : wantsPlayback;
+      playBtn.innerHTML = isActuallyPlaying ? pauseIcon() : playIcon();
+    };
+
+    const forcePause = () => {
+      playbackSyncId += 1;
+      wantsPlayback = false;
+      try { video.pause(); } catch (_) {}
+      setTimeout(() => { try { video.pause(); } catch (_) {} }, 0);
+      setTimeout(() => { try { video.pause(); } catch (_) {} }, 60);
+      setTimeout(() => { try { video.pause(); } catch (_) {} }, 180);
+      updatePlayIcon();
+    };
+
+    const startPlayback = async () => {
+      const syncId = ++playbackSyncId;
+
+      if (!metadataReady) {
+        updatePlayIcon();
+        return;
+      }
+
+      wantsPlayback = true;
+
+      if (video.ended) {
+        try { video.currentTime = 0; } catch (_) {}
+      }
+
+      try {
+        await video.play();
+      } catch (_) {
+        if (syncId !== playbackSyncId || !wantsPlayback) {
+          updatePlayIcon();
+          return;
+        }
+        const restoreMuted = video.muted;
+        const restoreVolume = video.volume;
+        const wasMuted = video.muted;
+        try {
+          video.muted = true;
+          await video.play();
+          updateMuteIcon();
+          setTimeout(() => {
+            if (syncId !== playbackSyncId || !wantsPlayback) return;
+            video.muted = restoreMuted;
+            video.volume = restoreVolume;
+            updateMuteIcon();
+          }, 0);
+        } catch (_) {
+          video.muted = wasMuted;
+          updateMuteIcon();
+        }
+      }
+
+      if (syncId !== playbackSyncId || !wantsPlayback) {
+        video.pause();
+      }
+      updatePlayIcon();
+    };
+
+    const finishReplay = () => {
+      wantsPlayback = false;
+      playbackSyncId += 1;
+      setRelativeTime(clipDuration);
+      video.pause();
+      updatePlayIcon();
+      if (this.settings.autoCloseReplay) setTimeout(cleanupReplay, 350);
+    };
+
+    const toggleReplayPlayback = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation?.();
+      if (wantsPlayback && !video.paused && !video.ended) {
+        forcePause();
+      } else {
+        wantsPlayback = true;
+        startPlayback();
+      }
+    };
+
+    playBtn.type = 'button';
+    playBtn.addEventListener('pointerdown', toggleReplayPlayback);
+    playBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation?.();
+    });
+
+    seek.addEventListener('input', () => {
+      isScrubbing = true;
+      const ms = parseInt(seek.value || '0', 10);
+      const rel = ms / 1000;
+      curEl.textContent = fmt(rel);
+      const percent = clipDuration > 0 ? (rel / clipDuration) * 100 : 0;
+      progressBar.style.width = Math.min(percent, 100) + '%';
+    });
+
+    const commitSeek = () => {
+      if (!metadataReady) return;
+      const ms = parseInt(seek.value || '0', 10);
+      const targetTime = Math.min(clipDuration, Math.max(0, ms / 1000));
+      pendingSeekTime = targetTime;
+      seekResumePending = wantsPlayback;
+      try { video.pause(); } catch (_) {}
+      try {
+        video.currentTime = targetTime;
+      } catch (_) {
+        try { video.currentTime = targetTime; } catch (_) {}
+      }
+      setRelativeTime(targetTime);
+      isScrubbing = false;
+    };
+
+    seek.addEventListener('change', commitSeek);
+    seek.addEventListener('mouseup', commitSeek);
+    seek.addEventListener('touchend', commitSeek);
 
     const updateLoop = () => {
       if (!this.replayWindow) return;
-
-      if (!isScrubbing) {
-        const t = video.currentTime || 0;
-        curEl.textContent = fmt(t);
-
-        const ms = Math.floor(t * 1000);
-        const max = parseInt(seek.max || '1000', 10);
-        seek.value = Math.min(ms, max).toString();
-
-        const percent = (t / knownDuration) * 100;
-        progressBar.style.width = `${Math.min(percent, 100)}%`;
+      if (!isScrubbing && pendingSeekTime === null && metadataReady) {
+        setRelativeTime(Math.min(video.currentTime || 0, clipDuration));
       }
-
-      const isPaused = video.paused;
-      playBtn.textContent = isPaused ? '▶' : '⏸';
-      playBtn.style.paddingLeft = isPaused ? '2px' : '0px';
+      updatePlayIcon();
       this._replayRaf = requestAnimationFrame(updateLoop);
     };
 
@@ -590,36 +663,69 @@ class TwitchReplayRecorder {
     }
     this._replayRaf = requestAnimationFrame(updateLoop);
 
-    playBtn.addEventListener('click', () => {
-      if (video.paused) video.play().catch(() => {});
-      else video.pause();
+    video.addEventListener('timeupdate', () => {
+      if (!metadataReady) return;
+      if (pendingSeekTime !== null) return;
+      const currentClipTime = Math.min(clipDuration, video.currentTime || 0);
+      setRelativeTime(currentClipTime);
+      if (currentClipTime >= clipDuration - 0.05) {
+        finishReplay();
+        return;
+      }
     });
 
-    // Scrub preview
-    seek.addEventListener('input', () => {
-      isScrubbing = true;
-      const ms = parseInt(seek.value || '0', 10);
-      curEl.textContent = fmt(ms / 1000);
-      const percent = (ms / 1000 / knownDuration) * 100;
-      progressBar.style.width = `${Math.min(percent, 100)}%`;
+    video.addEventListener('ended', () => {
+      if (!metadataReady) return;
+      finishReplay();
     });
 
-    // Commit scrub
-    const commitSeek = () => {
-      const ms = parseInt(seek.value || '0', 10);
-      const t = ms / 1000;
-      try { video.currentTime = Math.min(Math.max(0, t), knownDuration); } catch (_) {}
-      isScrubbing = false;
+    video.addEventListener('play', () => {
+      updatePlayIcon();
+    });
+    video.addEventListener('pause', () => {
+      updatePlayIcon();
+    });
+    video.addEventListener('seeked', () => {
+      if (!metadataReady) return;
+      const landedTime = Math.min(
+        clipDuration,
+        Number.isFinite(video.currentTime) ? video.currentTime : (pendingSeekTime !== null ? pendingSeekTime : 0)
+      );
+      pendingSeekTime = null;
+      setRelativeTime(landedTime);
+      if (seekResumePending === true) {
+        seekResumePending = null;
+        wantsPlayback = true;
+        startPlayback();
+      } else {
+        seekResumePending = null;
+        forcePause();
+      }
+    });
+
+    const handleReady = () => {
+      if (metadataReady) return;
+      metadataReady = true;
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        clipDuration = video.duration;
+        durEl.textContent = fmtTotal(clipDuration);
+        seek.max = Math.max(1, Math.floor(clipDuration * 1000)).toString();
+      }
+      setRelativeTime(0);
+      updatePlayIcon();
+      if (wantsPlayback) startPlayback();
     };
 
-    seek.addEventListener('change', commitSeek);
-    seek.addEventListener('mouseup', commitSeek);
-    seek.addEventListener('touchend', commitSeek);
+    video.addEventListener('loadedmetadata', handleReady, { once: true });
+    video.addEventListener('loadeddata', handleReady, { once: true });
+    video.addEventListener('canplay', handleReady, { once: true });
+
+    video.src = replayUrl;
+    try { video.load(); } catch (_) {}
 
     this.makeDraggable(container);
     this.makeResizable(container);
   }
-
   // Drag window via header chip
   makeDraggable(container) {
     const header = container.querySelector('.twitch-replay-header');
@@ -772,6 +878,14 @@ class TwitchReplayRecorder {
     if (this._replayRaf) {
       cancelAnimationFrame(this._replayRaf);
       this._replayRaf = null;
+    }
+    if (this._replayEscHandler) {
+      document.removeEventListener('keydown', this._replayEscHandler, true);
+      this._replayEscHandler = null;
+    }
+    if (this._releaseReplayAssets) {
+      try { this._releaseReplayAssets(); } catch (_) {}
+      this._releaseReplayAssets = null;
     }
     if (this.replayWindow) {
       this.replayWindow.remove();

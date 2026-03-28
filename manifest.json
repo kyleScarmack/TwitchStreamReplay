@@ -33,7 +33,7 @@
   },
   "web_accessible_resources": [
   {
-    "resources": ["rollingReplay.js"],
+    "resources": ["rollingReplay.js", "vendor/mediabunny.min.mjs"],
     "matches": ["*://*.twitch.tv/*"]
   }
 ]
