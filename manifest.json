@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Twitch Stream Replay",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Stream replay for Twitch with theatre/fullscreen support and modern UI",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://www.twitch.tv/*"],
