@@ -11,6 +11,7 @@ export default class WebCodecsRingBuffer {
   constructor(maxSeconds = 30, videoBitrate = 4_000_000) {
     this.maxSeconds = Math.max(5, Number(maxSeconds) || 30);
     this.videoBitrate = Math.max(250_000, Number(videoBitrate) || 4_000_000);
+    this.keyFrameInterval = 3;
 
     this.videoChunks = [];
     this.audioChunks = [];
@@ -19,7 +20,6 @@ export default class WebCodecsRingBuffer {
     this.audioEncoder = null;
     this.videoReader = null;
     this.audioReader = null;
-    this.audioContext = null;
 
     this.videoWidth = 0;
     this.videoHeight = 0;
@@ -28,6 +28,8 @@ export default class WebCodecsRingBuffer {
 
     this.firstVideoMeta = null;
     this.firstAudioMeta = null;
+    this.firstVideoTimestampUs = null;
+    this.firstAudioTimestampUs = null;
 
     this.running = false;
     this.paused = false;
@@ -64,8 +66,7 @@ export default class WebCodecsRingBuffer {
           this.firstVideoMeta = meta;
         }
 
-        const timestamp =
-          Number.isFinite(chunk.timestamp) ? chunk.timestamp : Math.round((performance.now() - this.startTime) * 1000);
+        const timestamp = this._normalizeTimestamp(chunk.timestamp, "video");
         this.videoChunks.push({
           data: buf,
           timestamp,
@@ -96,8 +97,7 @@ export default class WebCodecsRingBuffer {
             this.firstAudioMeta = meta;
           }
 
-          const timestamp =
-            Number.isFinite(chunk.timestamp) ? chunk.timestamp : Math.round((performance.now() - this.startTime) * 1000);
+          const timestamp = this._normalizeTimestamp(chunk.timestamp, "audio");
           this.audioChunks.push({
             data: buf,
             timestamp,
@@ -111,22 +111,9 @@ export default class WebCodecsRingBuffer {
       });
 
       try {
-        this.audioContext = new AudioContext({ sampleRate: 48_000 });
-        const source = this.audioContext.createMediaStreamSource(new MediaStream([audioTrack]));
-        const gainNode = this.audioContext.createGain();
-        gainNode.channelCount = 2;
-        gainNode.channelCountMode = "explicit";
-        gainNode.channelInterpretation = "speakers";
-        source.connect(gainNode);
-        const dest = this.audioContext.createMediaStreamDestination();
-        gainNode.connect(dest);
-
-        const stereoTrack = dest.stream.getAudioTracks?.()[0];
-        if (stereoTrack) {
-          const audioProcessor = new MediaStreamTrackProcessor({ track: stereoTrack });
-          this.audioReader = audioProcessor.readable.getReader();
-          this._processAudioFrames();
-        }
+        const audioProcessor = new MediaStreamTrackProcessor({ track: audioTrack });
+        this.audioReader = audioProcessor.readable.getReader();
+        this._processAudioFrames();
       } catch (e) {
         console.warn("[TSR] Audio processing unavailable; replay will be video-only.", e);
         this.audioEncoder = null;
@@ -204,9 +191,18 @@ export default class WebCodecsRingBuffer {
     const baseTimestamp = videoSlice[0].timestamp;
     const endTimestamp = videoSlice[videoSlice.length - 1].timestamp;
 
-    const audioSlice = this.audioChunks.filter(
+    let audioSlice = this.audioChunks.filter(
       (chunk) => chunk.timestamp >= baseTimestamp && chunk.timestamp <= endTimestamp
     );
+
+    if (audioSlice.length === 0 && this.audioChunks.length > 0) {
+      const replayDurationUs = Math.max(0, endTimestamp - baseTimestamp);
+      const latestAudioTimestamp = this.audioChunks[this.audioChunks.length - 1].timestamp;
+      const audioCutoff = Math.max(0, latestAudioTimestamp - replayDurationUs);
+      audioSlice = this.audioChunks.filter(
+        (chunk) => chunk.timestamp >= audioCutoff && chunk.timestamp <= latestAudioTimestamp
+      );
+    }
 
     try {
       const videoSource = new EncodedVideoPacketSource("vp8");
@@ -235,12 +231,13 @@ export default class WebCodecsRingBuffer {
       }
 
       if (audioSource) {
+        const audioBaseTimestamp = audioSlice[0]?.timestamp ?? baseTimestamp;
         for (let i = 0; i < audioSlice.length; i += 1) {
           const chunk = audioSlice[i];
           const packet = new EncodedPacket(
             chunk.data,
             chunk.isKey ? "key" : "delta",
-            (chunk.timestamp - baseTimestamp) / 1_000_000,
+            Math.max(0, (chunk.timestamp - audioBaseTimestamp) / 1_000_000),
             Math.max(0.001, (chunk.duration || 20_000) / 1_000_000)
           );
           const meta = i === 0 ? this.firstAudioMeta : undefined;
@@ -281,19 +278,16 @@ export default class WebCodecsRingBuffer {
     try {
       if (this.audioEncoder?.state !== "closed") this.audioEncoder.close();
     } catch (_) {}
-    try {
-      this.audioContext?.close();
-    } catch (_) {}
-
     this.videoChunks = [];
     this.audioChunks = [];
     this.videoEncoder = null;
     this.audioEncoder = null;
     this.videoReader = null;
     this.audioReader = null;
-    this.audioContext = null;
     this.firstVideoMeta = null;
     this.firstAudioMeta = null;
+    this.firstVideoTimestampUs = null;
+    this.firstAudioTimestampUs = null;
     this.audioEncoderConfigured = false;
     this.lastEncodedAt = 0;
   }
@@ -323,7 +317,8 @@ export default class WebCodecsRingBuffer {
           continue;
         }
 
-        const keyFrame = frameCount % 30 === 0;
+        // Dense keyframes make short replay clips much easier to scrub.
+        const keyFrame = frameCount % this.keyFrameInterval === 0;
         this.videoEncoder.encode(frame, { keyFrame });
         frame.close();
         frameCount += 1;
@@ -417,5 +412,22 @@ export default class WebCodecsRingBuffer {
       this.videoChunks[0];
 
     return Math.max(0.05, (latestTimestamp - startChunk.timestamp) / 1_000_000);
+  }
+
+  _normalizeTimestamp(timestamp, kind) {
+    const fallbackUs = Math.round((performance.now() - this.startTime) * 1000);
+    const rawTimestamp = Number.isFinite(timestamp) ? timestamp : fallbackUs;
+
+    if (kind === "video") {
+      if (this.firstVideoTimestampUs === null) {
+        this.firstVideoTimestampUs = rawTimestamp;
+      }
+      return Math.max(0, rawTimestamp - this.firstVideoTimestampUs);
+    }
+
+    if (this.firstAudioTimestampUs === null) {
+      this.firstAudioTimestampUs = rawTimestamp;
+    }
+    return Math.max(0, rawTimestamp - this.firstAudioTimestampUs);
   }
 }

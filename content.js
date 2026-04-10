@@ -395,6 +395,8 @@ class TwitchReplayRecorder {
     };
 
     let cleanupReplay = () => {
+      pendingSeekTime = null;
+      queuedSeekTime = null;
       this.isReplaying = false;
       this.closeReplay();
       if (this.videoElement) this.videoElement.volume = originalVolume;
@@ -508,7 +510,10 @@ class TwitchReplayRecorder {
 
     let clipDuration = initialDuration;
     let isScrubbing = false;
+    let isPointerScrubbing = false;
+    let seekReady = false;
     let pendingSeekTime = null;
+    let queuedSeekTime = null;
     let seekResumePending = null;
     let metadataReady = false;
     let wantsPlayback = true;
@@ -517,6 +522,7 @@ class TwitchReplayRecorder {
 
     durEl.textContent = fmtTotal(clipDuration);
     seek.max = Math.max(1, Math.floor(clipDuration * 1000)).toString();
+    seek.disabled = true;
 
     const setRelativeTime = (clipTime) => {
       const rel = Math.min(Math.max(0, clipTime), clipDuration);
@@ -534,6 +540,28 @@ class TwitchReplayRecorder {
       playBtn.innerHTML = isActuallyPlaying ? pauseIcon() : playIcon();
     };
 
+    const canSeekToTime = (targetTime) => {
+      if (!metadataReady) return false;
+      if (!Number.isFinite(video.duration) || video.duration <= 0) return false;
+      if (!video.seekable || video.seekable.length === 0) return false;
+      const desired = Math.min(Math.max(0, targetTime), clipDuration);
+      for (let i = 0; i < video.seekable.length; i += 1) {
+        const start = video.seekable.start(i);
+        const end = video.seekable.end(i);
+        if (desired >= Math.max(0, start - 0.05) && desired <= Math.min(clipDuration, end + 0.05)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const refreshSeekReady = () => {
+      seekReady = canSeekToTime(lastDisplayedTime) || canSeekToTime(0) || canSeekToTime(clipDuration * 0.5);
+      seek.disabled = !seekReady;
+      container.classList.toggle('twitch-replay-seek-disabled', !seekReady);
+      return seekReady;
+    };
+
     const forcePause = () => {
       playbackSyncId += 1;
       wantsPlayback = false;
@@ -544,10 +572,68 @@ class TwitchReplayRecorder {
       updatePlayIcon();
     };
 
+    const finalizeSeek = (landedTime = null) => {
+      if (!metadataReady) return;
+      if (pendingSeekTime === null && seekResumePending === null) return;
+      const resolvedTime = Math.min(
+        clipDuration,
+        landedTime ?? (Number.isFinite(video.currentTime) ? video.currentTime : (pendingSeekTime !== null ? pendingSeekTime : 0))
+      );
+      pendingSeekTime = null;
+      isScrubbing = false;
+      setRelativeTime(resolvedTime);
+      if (seekResumePending === true) {
+        seekResumePending = null;
+        wantsPlayback = true;
+        startPlayback();
+      } else {
+        seekResumePending = null;
+        forcePause();
+      }
+    };
+
+    const queueSeekUntilReady = (targetTime) => {
+      queuedSeekTime = targetTime;
+      seekReady = false;
+      seek.disabled = true;
+      container.classList.add('twitch-replay-seek-disabled');
+      seekResumePending = wantsPlayback;
+      setRelativeTime(targetTime);
+      isScrubbing = false;
+      updatePlayIcon();
+    };
+
+    const commitSeekTo = (targetTime) => {
+      pendingSeekTime = null;
+      queuedSeekTime = null;
+      pendingSeekTime = targetTime;
+      setRelativeTime(targetTime);
+      isScrubbing = false;
+      try {
+        video.currentTime = targetTime;
+      } catch (_) {
+        pendingSeekTime = null;
+      }
+    };
+
+    const flushQueuedSeek = () => {
+      if (queuedSeekTime === null) return false;
+      if (!refreshSeekReady() || !canSeekToTime(queuedSeekTime)) return false;
+      const targetTime = queuedSeekTime;
+      queuedSeekTime = null;
+      commitSeekTo(targetTime);
+      return true;
+    };
+
     const startPlayback = async () => {
       const syncId = ++playbackSyncId;
 
       if (!metadataReady) {
+        updatePlayIcon();
+        return;
+      }
+
+      if (queuedSeekTime !== null) {
         updatePlayIcon();
         return;
       }
@@ -619,34 +705,42 @@ class TwitchReplayRecorder {
       e.stopImmediatePropagation?.();
     });
 
-    seek.addEventListener('input', () => {
-      isScrubbing = true;
-      const ms = parseInt(seek.value || '0', 10);
-      const rel = ms / 1000;
-      curEl.textContent = fmt(rel);
-      const percent = clipDuration > 0 ? (rel / clipDuration) * 100 : 0;
-      progressBar.style.width = Math.min(percent, 100) + '%';
-    });
-
-    const commitSeek = () => {
-      if (!metadataReady) return;
+    const seekFromControl = () => {
       const ms = parseInt(seek.value || '0', 10);
       const targetTime = Math.min(clipDuration, Math.max(0, ms / 1000));
-      pendingSeekTime = targetTime;
-      seekResumePending = wantsPlayback;
-      try { video.pause(); } catch (_) {}
-      try {
-        video.currentTime = targetTime;
-      } catch (_) {
-        try { video.currentTime = targetTime; } catch (_) {}
-      }
+      isScrubbing = true;
       setRelativeTime(targetTime);
-      isScrubbing = false;
+      seekResumePending = wantsPlayback;
+      if (!refreshSeekReady() || !canSeekToTime(targetTime)) {
+        queueSeekUntilReady(targetTime);
+        return;
+      }
+      commitSeekTo(targetTime);
     };
 
-    seek.addEventListener('change', commitSeek);
-    seek.addEventListener('mouseup', commitSeek);
-    seek.addEventListener('touchend', commitSeek);
+    seek.addEventListener('pointerdown', () => {
+      isPointerScrubbing = true;
+      isScrubbing = true;
+      seekResumePending = wantsPlayback;
+    });
+    seek.addEventListener('pointerup', () => {
+      if (!isPointerScrubbing) return;
+      isPointerScrubbing = false;
+      if (pendingSeekTime === null) {
+        isScrubbing = false;
+      }
+    });
+    seek.addEventListener('pointercancel', () => {
+      isPointerScrubbing = false;
+      isScrubbing = false;
+    });
+    seek.addEventListener('input', seekFromControl);
+    seek.addEventListener('change', () => {
+      seekFromControl();
+      if (!isPointerScrubbing && pendingSeekTime === null) {
+        isScrubbing = false;
+      }
+    });
 
     const updateLoop = () => {
       if (!this.replayWindow) return;
@@ -665,7 +759,13 @@ class TwitchReplayRecorder {
 
     video.addEventListener('timeupdate', () => {
       if (!metadataReady) return;
-      if (pendingSeekTime !== null) return;
+      if (pendingSeekTime !== null) {
+        const landedTime = Number.isFinite(video.currentTime) ? video.currentTime : pendingSeekTime;
+        if (Math.abs(landedTime - pendingSeekTime) <= 0.2) {
+          finalizeSeek(landedTime);
+        }
+        return;
+      }
       const currentClipTime = Math.min(clipDuration, video.currentTime || 0);
       setRelativeTime(currentClipTime);
       if (currentClipTime >= clipDuration - 0.05) {
@@ -686,21 +786,9 @@ class TwitchReplayRecorder {
       updatePlayIcon();
     });
     video.addEventListener('seeked', () => {
-      if (!metadataReady) return;
-      const landedTime = Math.min(
-        clipDuration,
-        Number.isFinite(video.currentTime) ? video.currentTime : (pendingSeekTime !== null ? pendingSeekTime : 0)
-      );
-      pendingSeekTime = null;
-      setRelativeTime(landedTime);
-      if (seekResumePending === true) {
-        seekResumePending = null;
-        wantsPlayback = true;
-        startPlayback();
-      } else {
-        seekResumePending = null;
-        forcePause();
-      }
+      if (pendingSeekTime === null) return;
+      const landedTime = Number.isFinite(video.currentTime) ? video.currentTime : pendingSeekTime;
+      finalizeSeek(landedTime);
     });
 
     const handleReady = () => {
@@ -712,13 +800,26 @@ class TwitchReplayRecorder {
         seek.max = Math.max(1, Math.floor(clipDuration * 1000)).toString();
       }
       setRelativeTime(0);
+      refreshSeekReady();
       updatePlayIcon();
-      if (wantsPlayback) startPlayback();
+      const flushed = flushQueuedSeek();
+      if (!flushed && wantsPlayback) startPlayback();
     };
 
     video.addEventListener('loadedmetadata', handleReady, { once: true });
     video.addEventListener('loadeddata', handleReady, { once: true });
     video.addEventListener('canplay', handleReady, { once: true });
+    video.addEventListener('progress', flushQueuedSeek);
+    video.addEventListener('canplaythrough', flushQueuedSeek);
+    video.addEventListener('durationchange', () => {
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        clipDuration = video.duration;
+        durEl.textContent = fmtTotal(clipDuration);
+        seek.max = Math.max(1, Math.floor(clipDuration * 1000)).toString();
+      }
+      refreshSeekReady();
+      flushQueuedSeek();
+    });
 
     video.src = replayUrl;
     try { video.load(); } catch (_) {}
